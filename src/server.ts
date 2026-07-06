@@ -2,6 +2,7 @@ import { Agent, getAgentByName, routeAgentRequest } from "agents";
 import { generateText, stepCountIs } from "ai";
 import { getModel } from "./model";
 import { renderPlan } from "./views/plan";
+import { renderChat } from "./views/chat";
 import {
 	buildTrainingTools,
 	type Training,
@@ -366,6 +367,10 @@ export default {
 			return new Response(renderPlan(data), {
 				headers: { "content-type": "text/html; charset=utf-8" },
 			});
+		}
+
+		if (url.pathname === "/chat") {
+			return new Response(renderChat(), { headers: { "content-type": "text/html; charset=utf-8" } });
 		}
 
 		// Admin reset for repeatable demos. Disabled unless RESEED_TOKEN is set (safe by default).

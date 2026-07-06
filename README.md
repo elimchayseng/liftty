@@ -1,4 +1,8 @@
-# liftty
+<p align="center">
+  <img src="assets/liftty_avatar.png" alt="liftty" width="220" />
+</p>
+
+<h1 align="center">liftty</h1>
 
 A single-user weightlifting coach as a **stateful agent** on Cloudflare Workers. Each user is one Durable Object (Agents SDK) that owns its state, its embedded SQLite history, and its rest-timer alarms. Inference goes out through **AI Gateway** to Heroku Managed Inference (`claude-opus-4-8`); a live workout session runs over **WebSocket** with hibernation.
 
@@ -27,7 +31,8 @@ npm install
 # 1) Provision (see PLAN.md Phase 0): AI Gateway `liftty` + custom provider `heroku`
 # 2) Put real values in wrangler.jsonc (CF_ACCOUNT_ID) and .dev.vars (HEROKU_INFERENCE_KEY)
 npm run dev          # local: http://localhost:8787
-# chat: POST /agents/liftty-agent/me  { "message": "..." }
+# pages:  /plan  (gym reference)   ·   /chat  (talk to the coach)
+# api:    POST /agents/liftty-agent/me  { "message": "..." }
 
 wrangler secret put HEROKU_INFERENCE_KEY
 npm run deploy
