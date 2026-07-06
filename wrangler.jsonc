@@ -2,7 +2,7 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "liftty",
 	"main": "src/server.ts",
-	"compatibility_date": "2026-07-06",
+	"compatibility_date": "2026-03-10",
 	"compatibility_flags": ["nodejs_compat"],
 	"observability": { "enabled": true },
 	"durable_objects": {
