@@ -10,8 +10,9 @@
 	},
 	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["LifttyAgent"] }],
 	"vars": {
-		// Non-secret config. Fill CF_ACCOUNT_ID from Phase 0 (AI Gateway endpoint).
-		// AIG_TOKEN (gateway auth token, used for BYOK) is a SECRET → `wrangler secret put AIG_TOKEN`.
+		// Non-secret config. Fill CF_ACCOUNT_ID from Phase 0 (`wrangler whoami` or AI Gateway endpoint).
+		// Secrets (not here): HEROKU_INFERENCE_KEY (required) → `wrangler secret put HEROKU_INFERENCE_KEY`.
+		// AIG_TOKEN (optional, only if Authenticated Gateway is enabled) → `wrangler secret put AIG_TOKEN`.
 		"CF_ACCOUNT_ID": "<FILL_FROM_PHASE_0>",
 		"AI_GATEWAY": "liftty",
 		"PROVIDER_SLUG": "heroku",

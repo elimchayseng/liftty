@@ -22,11 +22,11 @@ See **[PLAN.md](./PLAN.md)** for the phased build, architecture diagrams, and do
 
 ```sh
 npm install
-# 1) Provision (see PLAN.md Phase 0): Workers Paid, AI Gateway `liftty` + custom provider `heroku` + BYOK
-# 2) Put real values in wrangler.jsonc (CF_ACCOUNT_ID) and .dev.vars (AIG_TOKEN)
+# 1) Provision (see PLAN.md Phase 0): AI Gateway `liftty` + custom provider `heroku`
+# 2) Put real values in wrangler.jsonc (CF_ACCOUNT_ID) and .dev.vars (HEROKU_INFERENCE_KEY)
 npm run dev          # local: http://localhost:8787
 # chat: POST /agents/liftty-agent/me  { "message": "..." }
 
-wrangler secret put AIG_TOKEN
+wrangler secret put HEROKU_INFERENCE_KEY
 npm run deploy
 ```
