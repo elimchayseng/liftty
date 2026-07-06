@@ -1,15 +1,18 @@
 import type { State, SessionRow, Lift, PrescribedDay } from "../server";
 
 /**
- * Server-rendered /plan — the gym reference page. Mobile-first, dark, big type,
- * "today" (first program day for the demo) surfaced on top. No framework, no build step.
+ * Server-rendered /plan — the gym reference page. Mobile-first, dark, big type.
+ * "Today" advances as sessions are logged (the day after the most recent focus).
  * Data is real (derived from prev-coach-handoff.md + workout-log.csv).
  */
-export function renderPlan(data: { state: State; recentSessions: SessionRow[] }): string {
-	const { state, recentSessions } = data;
+export function renderPlan(data: { state: State; recentSessions: SessionRow[]; today: number }): string {
+	const { state, recentSessions, today } = data;
 	const { lifter, program } = state;
-	const today = program.days[0];
-	const rest = program.days.slice(1);
+	const days = program.days;
+	const todayDay = days[today];
+	// Upcoming days in rotation order after today (wraps).
+	const upcoming: PrescribedDay[] = [];
+	for (let k = 1; k < days.length; k++) upcoming.push(days[(today + k) % days.length]);
 
 	return `<!doctype html>
 <html lang="en">
@@ -71,7 +74,7 @@ export function renderPlan(data: { state: State; recentSessions: SessionRow[] })
 
   ${lifter.status ? `<div class="banner"><b>Status:</b> ${esc(lifter.status)}</div>` : ""}
 
-  ${today ? renderDayCard(today, true) : `<div class="card muted">No program set.</div>`}
+  ${todayDay ? renderDayCard(todayDay, true) : `<div class="card muted">No program set.</div>`}
 
   <h2 class="section">Main lifts — where we're headed</h2>
   <div class="card">
@@ -91,8 +94,8 @@ export function renderPlan(data: { state: State; recentSessions: SessionRow[] })
     ${lifter.injuries.map((i) => `<div class="inj">${esc(i)}</div>`).join("")}
   </div>
 
-  <h2 class="section">Rest of the week</h2>
-  ${rest.map((d) => renderDayCard(d, false)).join("")}
+  <h2 class="section">Coming up</h2>
+  ${upcoming.map((d) => renderDayCard(d, false)).join("")}
 
   <h2 class="section">Recent sessions <span class="muted">(Dec–Jan block)</span></h2>
   ${
@@ -114,14 +117,15 @@ function renderDayCard(day: PrescribedDay, isToday: boolean): string {
 }
 
 function renderLift(l: Lift): string {
-	const each = l.note === "each side" ? ` <small>/side</small>` : "";
-	const noteLine = l.note && l.note !== "each side" ? `<span class="note">${esc(l.note)}</span>` : "";
-	const rounds = l.note === "rounds";
-	const rx = rounds
-		? `<span class="rx"><b>${l.sets}</b> <small>rounds</small></span>`
-		: l.weight
-			? `<span class="rx">${l.sets}×${l.reps} · <b>${l.weight}</b> <small>lb${each}</small></span>`
-			: `<span class="rx"><b>${l.sets}×${l.reps}</b>${each ? ` <small>${each.trim()}</small>` : ` <small>BW</small>`}</span>`;
+	let rx: string;
+	if (l.kind === "rounds") {
+		rx = `<span class="rx"><b>${l.sets}</b> <small>rounds</small></span>`;
+	} else if (l.weight != null) {
+		rx = `<span class="rx">${l.sets}×${l.reps} · <b>${l.weight}</b> <small>lb${l.perSide ? " /side" : ""}</small></span>`;
+	} else {
+		rx = `<span class="rx"><b>${l.sets}×${l.reps}</b> <small>${l.perSide ? "/side" : "BW"}</small></span>`;
+	}
+	const noteLine = l.note ? `<span class="note">${esc(l.note)}</span>` : "";
 	return `<div class="lift">
     <span class="name">${esc(l.exercise)}${noteLine}</span>
     ${rx}
@@ -129,17 +133,19 @@ function renderLift(l: Lift): string {
 }
 
 function renderSession(s: SessionRow): string {
-	let focus = "";
+	let label = s.status;
 	let summary = "";
 	try {
-		const a = JSON.parse(s.actuals) as { focus?: string; summary?: string };
-		focus = a.focus ?? "";
+		const a = JSON.parse(s.actuals) as { focus?: string; summary?: string; week?: number; day?: string };
+		const wk = a.week ? `Wk ${a.week}` : "";
+		const parts = [wk, a.day, a.focus].filter(Boolean).join(" · ");
+		label = parts || s.status;
 		summary = a.summary ?? "";
 	} catch {
-		/* leave blank */
+		/* leave defaults */
 	}
 	return `<div class="card sess">
-    <div class="top"><span>${esc(focus || s.status)}</span><span class="date">${esc(s.date)}</span></div>
+    <div class="top"><span>${esc(label)}</span><span class="date">${esc(s.date)}</span></div>
     ${summary ? `<div class="sum">${esc(summary)}</div>` : ""}
   </div>`;
 }
