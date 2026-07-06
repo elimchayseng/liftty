@@ -16,7 +16,9 @@ See **[PLAN.md](./PLAN.md)** for the phased build, architecture diagrams, and do
 
 ## Status
 
-- **M0 — scaffold + inference wiring:** ✅ code complete. Worker boots, DO binding + chat endpoint wired, request reaches AI Gateway. Blocked on Phase 0 creds for a live round-trip.
+- **M0 — scaffold + inference wiring:** ✅ deployed. Worker + DO + AI Gateway → Heroku chat round-trip.
+- **M1 — agent state + `/plan`:** ✅ deployed. Seeded from real athlete data; mobile `/plan` view; state persists (seed-once).
+- **M2 — typed `Training` tools:** ✅ the coach reads/mutates via 4 typed tools (`getProgram`, `getHistory`, `logSet`, `adjustProgram`) in a multi-step chat loop. "How's my squat trending?" reads history; "deload"/"set X to Y" mutates the program.
 
 ## Run it
 
