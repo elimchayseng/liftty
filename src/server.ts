@@ -9,6 +9,7 @@ import {
 	type SessionLog,
 	type SetInput,
 	type ProgramChange,
+	type AdjustResult,
 } from "./training";
 
 /**
@@ -246,18 +247,29 @@ export class LifttyAgent extends Agent<Env, State> implements Training {
 		return { activeSets: loggedSets.length, message: `Logged ${set.exercise} ${set.reps}${w} (set ${loggedSets.length} of ${active.day})` };
 	}
 
-	adjustProgram(change: ProgramChange): ProgramView {
+	adjustProgram(change: ProgramChange): AdjustResult {
 		const program = structuredClone(this.state.program);
+		const changed: string[] = [];
 		switch (change.op) {
 			case "deload": {
 				const pct = change.pct ?? 10;
-				for (const d of program.days) for (const l of d.lifts) if (l.weight != null) l.weight = Math.round((l.weight * (1 - pct / 100)) / 5) * 5;
+				for (const d of program.days)
+					for (const l of d.lifts)
+						if (l.weight != null) {
+							l.weight = Math.round((l.weight * (1 - pct / 100)) / 5) * 5;
+							changed.push(l.exercise);
+						}
 				program.phase = program.phase.replace(/ · deload wk$/, "") + " · deload wk";
 				break;
 			}
 			case "setExerciseWeight": {
 				const q = change.exercise.toLowerCase();
-				for (const d of program.days) for (const l of d.lifts) if (l.exercise.toLowerCase().includes(q)) l.weight = change.weight;
+				for (const d of program.days)
+					for (const l of d.lifts)
+						if (l.exercise.toLowerCase().includes(q)) {
+							l.weight = change.weight;
+							changed.push(l.exercise);
+						}
 				break;
 			}
 			case "advanceWeek":
@@ -269,7 +281,7 @@ export class LifttyAgent extends Agent<Env, State> implements Training {
 				break;
 		}
 		this.setState({ ...this.state, program });
-		return this.getProgram();
+		return { program: this.getProgram(), changed: [...new Set(changed)] };
 	}
 
 	/** Runs on every wake (idempotent). Create tables; seed state + history ONCE per SEED_VERSION. */
@@ -288,15 +300,27 @@ export class LifttyAgent extends Agent<Env, State> implements Training {
 		if (seeded >= SEED_VERSION) return; // already seeded — never clobber real edits
 
 		this.setState(SEED_STATE);
+		this.seedSessions();
+		this.sql`INSERT INTO meta (key, value) VALUES ('seed_version', ${String(SEED_VERSION)})
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value`;
+	}
+
+	/** Upsert the real logged block (idempotent; a SEED_VERSION bump refreshes rows). */
+	private seedSessions() {
 		for (const s of SEED_SESSIONS) {
 			const actuals = JSON.stringify({ focus: s.focus, summary: s.summary, week: s.week, day: s.day });
-			// Upsert so a SEED_VERSION bump refreshes seeded rows (e.g. new actuals fields).
 			this.sql`INSERT INTO sessions (id, date, status, prescribed, actuals)
 				VALUES (${s.id}, ${s.date}, ${"completed"}, ${"{}"}, ${actuals})
 				ON CONFLICT(id) DO UPDATE SET date = excluded.date, status = excluded.status, actuals = excluded.actuals`;
-		}
-		this.sql`INSERT INTO meta (key, value) VALUES ('seed_version', ${String(SEED_VERSION)})
-			ON CONFLICT(key) DO UPDATE SET value = excluded.value`;
+	}
+	}
+
+	/** Admin: reset to the pristine seed (repeatable demos). Gated by a route + RESEED_TOKEN. */
+	reseed(): { ok: true } {
+		this.sql`DELETE FROM sessions`;
+		this.seedSessions();
+		this.setState(SEED_STATE);
+		return { ok: true };
 	}
 
 	/** RPC: everything the /plan view needs, in one round-trip. */
@@ -342,6 +366,15 @@ export default {
 			return new Response(renderPlan(data), {
 				headers: { "content-type": "text/html; charset=utf-8" },
 			});
+		}
+
+		// Admin reset for repeatable demos. Disabled unless RESEED_TOKEN is set (safe by default).
+		if (url.pathname === "/reseed") {
+			if (!env.RESEED_TOKEN) return new Response("reseed disabled — set the RESEED_TOKEN secret to enable", { status: 404 });
+			if (url.searchParams.get("token") !== env.RESEED_TOKEN) return new Response("forbidden", { status: 403 });
+			const me = await getAgentByName(env.LifttyAgent, "me");
+			await me.reseed();
+			return Response.json({ ok: true, message: "reseeded to pristine" });
 		}
 
 		// /session lands in M4.

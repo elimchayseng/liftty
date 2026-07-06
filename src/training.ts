@@ -41,11 +41,14 @@ export type ProgramChange =
 	| { op: "advanceWeek" }
 	| { op: "setPhase"; phase: string; goal?: string };
 
+/** adjustProgram reports exactly which exercises it touched, so the coach can report ground truth. */
+export type AdjustResult = { program: ProgramView; changed: string[] };
+
 export interface Training {
 	getProgram(): ProgramView;
 	getHistory(exercise?: string, limit?: number): SessionLog[];
 	logSet(set: SetInput): { activeSets: number; message: string };
-	adjustProgram(change: ProgramChange): ProgramView;
+	adjustProgram(change: ProgramChange): AdjustResult;
 }
 
 type AdjustInput = {
@@ -99,7 +102,7 @@ export function buildTrainingTools(t: Training) {
 		}),
 		adjustProgram: tool({
 			description:
-				"Change the program and return the updated view. op=deload cuts working weights (optional pct, default 10); op=setExerciseWeight sets weight for lifts matching `exercise`; op=advanceWeek bumps the week; op=setPhase sets `phase` (and optional `goal`). Respect the lifter's injury constraints when adjusting.",
+				"Change the program and return { program, changed } where `changed` lists the exact exercises modified — report those to the lifter (note: `setExerciseWeight` matches by name substring, so 'front squat' can touch several variants). op=deload cuts working weights (optional pct, default 10); op=setExerciseWeight sets weight for lifts matching `exercise`; op=advanceWeek bumps the week; op=setPhase sets `phase` (and optional `goal`). Respect the lifter's injury constraints when adjusting.",
 			inputSchema: jsonSchema<AdjustInput>({
 				type: "object",
 				properties: {

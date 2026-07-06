@@ -31,4 +31,7 @@ npm run dev          # local: http://localhost:8787
 
 wrangler secret put HEROKU_INFERENCE_KEY
 npm run deploy
+
+# Optional: enable the repeatable-demo reset. Disabled unless the secret is set.
+wrangler secret put RESEED_TOKEN          # then: GET /reseed?token=<value> resets to the pristine seed
 ```
