@@ -1,0 +1,20 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "liftty",
+	"main": "src/server.ts",
+	"compatibility_date": "2026-07-06",
+	"compatibility_flags": ["nodejs_compat"],
+	"observability": { "enabled": true },
+	"durable_objects": {
+		"bindings": [{ "name": "LifttyAgent", "class_name": "LifttyAgent" }]
+	},
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["LifttyAgent"] }],
+	"vars": {
+		// Non-secret config. Fill CF_ACCOUNT_ID from Phase 0 (AI Gateway endpoint).
+		// AIG_TOKEN (gateway auth token, used for BYOK) is a SECRET → `wrangler secret put AIG_TOKEN`.
+		"CF_ACCOUNT_ID": "<FILL_FROM_PHASE_0>",
+		"AI_GATEWAY": "liftty",
+		"PROVIDER_SLUG": "heroku",
+		"MODEL": "claude-opus-4-8"
+	}
+}
