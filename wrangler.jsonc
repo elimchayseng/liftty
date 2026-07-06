@@ -6,16 +6,16 @@
 	"compatibility_flags": ["nodejs_compat"],
 	"observability": { "enabled": true },
 	"durable_objects": {
-		"bindings": [{ "name": "LifttyAgent", "class_name": "LifttyAgent" }]
+		"bindings": [{ "name": "LifttyAgent", "class_name": "LifttyAgent" }],
 	},
 	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["LifttyAgent"] }],
 	"vars": {
 		// Non-secret config. Fill CF_ACCOUNT_ID from Phase 0 (`wrangler whoami` or AI Gateway endpoint).
 		// Secrets (not here): HEROKU_INFERENCE_KEY (required) → `wrangler secret put HEROKU_INFERENCE_KEY`.
 		// AIG_TOKEN (optional, only if Authenticated Gateway is enabled) → `wrangler secret put AIG_TOKEN`.
-		"CF_ACCOUNT_ID": "<FILL_FROM_PHASE_0>",
+		"CF_ACCOUNT_ID": "9897c3ca5369aac50924bf7b7a68143c",
 		"AI_GATEWAY": "liftty",
 		"PROVIDER_SLUG": "heroku",
-		"MODEL": "claude-opus-4-8"
-	}
+		"MODEL": "claude-opus-4-8",
+	},
 }
