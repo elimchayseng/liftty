@@ -74,6 +74,8 @@ export function renderPlan(data: { state: State; recentSessions: SessionRow[]; t
 
   ${lifter.status ? `<div class="banner"><b>Status:</b> ${esc(lifter.status)}</div>` : ""}
 
+  ${state.activeSession && state.activeSession.loggedSets.length ? renderActive(state.activeSession) : ""}
+
   ${todayDay ? renderDayCard(todayDay, true) : `<div class="card muted">No program set.</div>`}
 
   <h2 class="section">Main lifts — where we're headed</h2>
@@ -105,6 +107,18 @@ export function renderPlan(data: { state: State; recentSessions: SessionRow[]; t
 	}
 </body>
 </html>`;
+}
+
+function renderActive(a: NonNullable<State["activeSession"]>): string {
+	return `<div class="card today">
+    <div class="eyebrow">In progress · ${esc(a.day)}</div>
+    ${a.loggedSets
+			.map(
+				(s) =>
+					`<div class="lift"><span class="name">${esc(s.exercise)}</span><span class="rx">${s.reps} reps · <b>${s.weight || "BW"}</b>${s.weight ? " <small>lb</small>" : ""}</span></div>`,
+			)
+			.join("")}
+  </div>`;
 }
 
 function renderDayCard(day: PrescribedDay, isToday: boolean): string {

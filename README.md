@@ -1,4 +1,8 @@
-# liftty
+<p align="center">
+  <img src="assets/liftty_avatar.png" alt="liftty" width="220" />
+</p>
+
+<h1 align="center">liftty</h1>
 
 A single-user weightlifting coach as a **stateful agent** on Cloudflare Workers. Each user is one Durable Object (Agents SDK) that owns its state, its embedded SQLite history, and its rest-timer alarms. Inference goes out through **AI Gateway** to Heroku Managed Inference (`claude-opus-4-8`); a live workout session runs over **WebSocket** with hibernation.
 
@@ -16,7 +20,9 @@ See **[PLAN.md](./PLAN.md)** for the phased build, architecture diagrams, and do
 
 ## Status
 
-- **M0 — scaffold + inference wiring:** ✅ code complete. Worker boots, DO binding + chat endpoint wired, request reaches AI Gateway. Blocked on Phase 0 creds for a live round-trip.
+- **M0 — scaffold + inference wiring:** ✅ deployed. Worker + DO + AI Gateway → Heroku chat round-trip.
+- **M1 — agent state + `/plan`:** ✅ deployed. Seeded from real athlete data; mobile `/plan` view; state persists (seed-once).
+- **M2 — typed `Training` tools:** ✅ the coach reads/mutates via 4 typed tools (`getProgram`, `getHistory`, `logSet`, `adjustProgram`) in a multi-step chat loop. "How's my squat trending?" reads history; "deload"/"set X to Y" mutates the program.
 
 ## Run it
 
@@ -25,8 +31,12 @@ npm install
 # 1) Provision (see PLAN.md Phase 0): AI Gateway `liftty` + custom provider `heroku`
 # 2) Put real values in wrangler.jsonc (CF_ACCOUNT_ID) and .dev.vars (HEROKU_INFERENCE_KEY)
 npm run dev          # local: http://localhost:8787
-# chat: POST /agents/liftty-agent/me  { "message": "..." }
+# pages:  /plan  (gym reference)   ·   /chat  (talk to the coach)
+# api:    POST /agents/liftty-agent/me  { "message": "..." }
 
 wrangler secret put HEROKU_INFERENCE_KEY
 npm run deploy
+
+# Optional: enable the repeatable-demo reset. Disabled unless the secret is set.
+wrangler secret put RESEED_TOKEN          # then: GET /reseed?token=<value> resets to the pristine seed
 ```

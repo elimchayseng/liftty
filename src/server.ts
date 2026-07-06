@@ -1,7 +1,17 @@
 import { Agent, getAgentByName, routeAgentRequest } from "agents";
-import { generateText } from "ai";
+import { generateText, stepCountIs } from "ai";
 import { getModel } from "./model";
 import { renderPlan } from "./views/plan";
+import { renderChat } from "./views/chat";
+import {
+	buildTrainingTools,
+	type Training,
+	type ProgramView,
+	type SessionLog,
+	type SetInput,
+	type ProgramChange,
+	type AdjustResult,
+} from "./training";
 
 /**
  * liftty — a stateful lifting coach.
@@ -190,8 +200,90 @@ function todayIndex(days: PrescribedDay[], recent: SessionRow[]): number {
 	return 0;
 }
 
-export class LifttyAgent extends Agent<Env, State> {
+export class LifttyAgent extends Agent<Env, State> implements Training {
 	initialState = SEED_STATE;
+
+	// --- Typed Training API (M2). Same interface Code Mode will route through in M3. ---
+
+	getProgram(): ProgramView {
+		const { program, lifter } = this.state;
+		return {
+			phase: program.phase,
+			goal: program.goal,
+			weekIndex: program.weekIndex,
+			days: program.days,
+			mains: lifter.mains,
+			injuries: lifter.injuries,
+			status: lifter.status,
+		};
+	}
+
+	getHistory(exercise?: string, limit = 10): SessionLog[] {
+		const rows = this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 50`;
+		const logs = rows.map((r): SessionLog => {
+			let a: { focus?: string; summary?: string; week?: number; day?: string } = {};
+			try {
+				a = JSON.parse(r.actuals);
+			} catch {
+				/* ignore */
+			}
+			return { id: r.id, date: r.date, status: r.status, week: a.week, day: a.day, focus: a.focus, summary: a.summary };
+		});
+		const filtered = exercise
+			? logs.filter((l) => `${l.focus ?? ""} ${l.summary ?? ""}`.toLowerCase().includes(exercise.toLowerCase()))
+			: logs;
+		return filtered.slice(0, limit);
+	}
+
+	logSet(set: SetInput): { activeSets: number; message: string } {
+		let active = this.state.activeSession;
+		if (!active) {
+			const recent = this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 1`;
+			const day = this.state.program.days[todayIndex(this.state.program.days, recent)]?.focus ?? "Session";
+			active = { startedAt: new Date().toISOString(), day, loggedSets: [] };
+		}
+		const loggedSets = [...active.loggedSets, { exercise: set.exercise, reps: set.reps, weight: set.weight ?? 0 }];
+		this.setState({ ...this.state, activeSession: { ...active, loggedSets } });
+		const w = set.weight != null ? ` @ ${set.weight}` : "";
+		return { activeSets: loggedSets.length, message: `Logged ${set.exercise} ${set.reps}${w} (set ${loggedSets.length} of ${active.day})` };
+	}
+
+	adjustProgram(change: ProgramChange): AdjustResult {
+		const program = structuredClone(this.state.program);
+		const changed: string[] = [];
+		switch (change.op) {
+			case "deload": {
+				const pct = change.pct ?? 10;
+				for (const d of program.days)
+					for (const l of d.lifts)
+						if (l.weight != null) {
+							l.weight = Math.round((l.weight * (1 - pct / 100)) / 5) * 5;
+							changed.push(l.exercise);
+						}
+				program.phase = program.phase.replace(/ · deload wk$/, "") + " · deload wk";
+				break;
+			}
+			case "setExerciseWeight": {
+				const q = change.exercise.toLowerCase();
+				for (const d of program.days)
+					for (const l of d.lifts)
+						if (l.exercise.toLowerCase().includes(q)) {
+							l.weight = change.weight;
+							changed.push(l.exercise);
+						}
+				break;
+			}
+			case "advanceWeek":
+				program.weekIndex += 1;
+				break;
+			case "setPhase":
+				program.phase = change.phase;
+				if (change.goal) program.goal = change.goal;
+				break;
+		}
+		this.setState({ ...this.state, program });
+		return { program: this.getProgram(), changed: [...new Set(changed)] };
+	}
 
 	/** Runs on every wake (idempotent). Create tables; seed state + history ONCE per SEED_VERSION. */
 	async onStart() {
@@ -209,15 +301,27 @@ export class LifttyAgent extends Agent<Env, State> {
 		if (seeded >= SEED_VERSION) return; // already seeded — never clobber real edits
 
 		this.setState(SEED_STATE);
+		this.seedSessions();
+		this.sql`INSERT INTO meta (key, value) VALUES ('seed_version', ${String(SEED_VERSION)})
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value`;
+	}
+
+	/** Upsert the real logged block (idempotent; a SEED_VERSION bump refreshes rows). */
+	private seedSessions() {
 		for (const s of SEED_SESSIONS) {
 			const actuals = JSON.stringify({ focus: s.focus, summary: s.summary, week: s.week, day: s.day });
-			// Upsert so a SEED_VERSION bump refreshes seeded rows (e.g. new actuals fields).
 			this.sql`INSERT INTO sessions (id, date, status, prescribed, actuals)
 				VALUES (${s.id}, ${s.date}, ${"completed"}, ${"{}"}, ${actuals})
 				ON CONFLICT(id) DO UPDATE SET date = excluded.date, status = excluded.status, actuals = excluded.actuals`;
-		}
-		this.sql`INSERT INTO meta (key, value) VALUES ('seed_version', ${String(SEED_VERSION)})
-			ON CONFLICT(key) DO UPDATE SET value = excluded.value`;
+	}
+	}
+
+	/** Admin: reset to the pristine seed (repeatable demos). Gated by a route + RESEED_TOKEN. */
+	reseed(): { ok: true } {
+		this.sql`DELETE FROM sessions`;
+		this.seedSessions();
+		this.setState(SEED_STATE);
+		return { ok: true };
 	}
 
 	/** RPC: everything the /plan view needs, in one round-trip. */
@@ -227,7 +331,10 @@ export class LifttyAgent extends Agent<Env, State> {
 		return { state: this.state, recentSessions, today: todayIndex(this.state.program.days, recentSessions) };
 	}
 
-	/** Chat round-trip. POST { message } → coach reply. Coach is injury-aware via live state. */
+	/**
+	 * Chat round-trip (M2). POST { message } → coach reply.
+	 * The coach reads/mutates via the four typed Training tools; injury-aware via live state.
+	 */
 	async onRequest(request: Request): Promise<Response> {
 		if (request.method !== "POST") {
 			return Response.json({ error: "POST { message } here" }, { status: 405 });
@@ -236,12 +343,17 @@ export class LifttyAgent extends Agent<Env, State> {
 		if (!message) {
 			return Response.json({ error: "missing 'message'" }, { status: 400 });
 		}
-		const { text } = await generateText({
+		const result = await generateText({
 			model: getModel(this.env),
 			system: coachSystem(this.state),
 			prompt: message,
+			tools: buildTrainingTools(this),
+			stopWhen: stepCountIs(8),
 		});
-		return Response.json({ reply: text });
+		// Surface which tools ran (across all steps) — useful for the demo, and the exact place
+		// M3 will show "one codemode call" collapsing what is several tool calls here.
+		const toolsUsed = result.steps.flatMap((s) => s.toolCalls.map((c) => c.toolName));
+		return Response.json({ reply: result.text, toolsUsed, steps: result.steps.length });
 	}
 }
 
@@ -255,6 +367,19 @@ export default {
 			return new Response(renderPlan(data), {
 				headers: { "content-type": "text/html; charset=utf-8" },
 			});
+		}
+
+		if (url.pathname === "/chat") {
+			return new Response(renderChat(), { headers: { "content-type": "text/html; charset=utf-8" } });
+		}
+
+		// Admin reset for repeatable demos. Disabled unless RESEED_TOKEN is set (safe by default).
+		if (url.pathname === "/reseed") {
+			if (!env.RESEED_TOKEN) return new Response("reseed disabled — set the RESEED_TOKEN secret to enable", { status: 404 });
+			if (url.searchParams.get("token") !== env.RESEED_TOKEN) return new Response("forbidden", { status: 403 });
+			const me = await getAgentByName(env.LifttyAgent, "me");
+			await me.reseed();
+			return Response.json({ ok: true, message: "reseeded to pristine" });
 		}
 
 		// /session lands in M4.
