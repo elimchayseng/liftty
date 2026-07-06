@@ -10,6 +10,31 @@ Re-platform a single-user weightlifting tracker into a **stateful coaching agent
 
 ---
 
+## Progress log (as of 2026-07-06)
+
+Live URL: **https://liftty.elimchayseng13.workers.dev** · repo `elimchayseng/liftty` · account `9897c3ca…143c` · AI Gateway `liftty` (custom provider `heroku`).
+
+**Done and merged to `main`:**
+- **Phase 0 — provisioned.** Workers deploy live; AI Gateway `liftty` + custom provider `heroku`; `HEROKU_INFERENCE_KEY` set as a prod secret. Correction to the original brief: a *custom* AI Gateway provider does NOT store the upstream key (BYOK dropdown is for named providers only) — the Worker passes it as `Authorization: Bearer`; `cf-aig-authorization` (Authenticated Gateway) is optional and unused. See `src/model.ts`.
+- **M0 — scaffold + inference.** `LifttyAgent` (Agents SDK DO) + Worker router; chat round-trips Worker → AI Gateway → Heroku `claude-opus-4-8` via `@ai-sdk/openai-compatible`.
+- **M1 — state + `/plan`.** State seeded from real athlete data (`prev-coach-handoff.md` + `workout-log.csv`, both committed as source of truth): lifter profile, ankle injury constraints, 3 mains with 3RM goals + December bests, a 3-day A/B/C rebuild block, and 8 real logged sessions in SQLite. `/plan` is a mobile-first server-rendered view. Seeding is **one-time** via a `meta.seed_version` flag so edits persist (persistence is genuinely observable, not masked by re-seed).
+- **M2 — four typed `Training` tools.** `getProgram` / `getHistory` / `logSet` / `adjustProgram` on `LifttyAgent` (`src/training.ts` holds the interface + tool wrappers), driven by a multi-step `generateText` loop (`stepCountIs(8)`). Coach is injury/context-aware and reads real history. `/chat` page added to exercise it in a browser (shows a per-turn tool badge).
+- **Review fixes (M1 + M2).** Ran `/review` after each; fixes applied: seed-once, injury-aware coach prompt, dynamic "Today", week-labeled history, `perSide`/`rounds` render flags; `adjustProgram` returns `changed[]`; `/plan` renders the in-progress `activeSession`; `/reseed?token=` admin reset (disabled unless `RESEED_TOKEN` secret set) for repeatable demos.
+- Open follow-ups: issues **#3** (getHistory 50-row prefetch) and **#4** (adjustProgram split validation) — low priority.
+
+**Friction log so far (interview deliverable — finalize in M5 `FRICTION.md`):**
+1. **Docs drift is real.** Code Mode SDK was rewritten (`@cloudflare/codemode` v0.1.0, Feb 2026) — old `experimental_codemode` gone; agents-starter is now Vite+React; `onStateUpdate`→`onStateChanged`. Fetch-at-runtime paid off.
+2. **Custom-provider auth:** upstream key goes in `Authorization` header, not BYOK (see above). The 401 we first hit was Heroku rejecting a placeholder key, not a Cloudflare problem.
+3. **zod v4 → `$schema` rejection.** AI SDK v6 + zod v4 emits a top-level `$schema` key that Heroku's Anthropic endpoint rejects. Fix: define tool schemas with `jsonSchema()`.
+4. **Heroku requires non-empty message content.** AI SDK emits empty content for tool-only assistant turns; Anthropic also rejects whitespace-only blocks. Fix: a request shim in `src/model.ts` substituting a non-whitespace placeholder on intermediate messages.
+5. **Seeding vs persistence narrative:** an every-wake reseed would mask the very persistence guarantee the demo sells. Seed-once fixes it.
+
+**Current prod state:** pristine seed (front squat opener 125, no deload markers, no in-progress session). `/reseed` disabled in prod (no `RESEED_TOKEN` secret).
+
+**Next: M3 — Code Mode** (branch `m3-code-mode`). Route the same four `Training` tools through `@cloudflare/codemode` (`DynamicWorkerExecutor` + `createCodeTool`) + a `worker_loaders` binding, so the agent writes one code snippet against the typed API instead of several tool calls. `m2-baseline` tag is the fallback. Needs Workers Paid (already required) — verify Dynamic Worker Loader access on deploy. See Phase 5 below.
+
+---
+
 ## Architecture diagrams & flows
 
 > Every box is labeled with the Cloudflare product doing the work. Mermaid renders in GitHub, VS Code, and most markdown viewers.
