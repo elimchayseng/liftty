@@ -1,31 +1,56 @@
-import { Agent, routeAgentRequest } from "agents";
+import { Agent, getAgentByName, routeAgentRequest } from "agents";
 import { generateText } from "ai";
 import { getModel } from "./model";
+import { renderPlan } from "./views/plan";
 
 /**
  * liftty — a stateful lifting coach.
  *
  * One `LifttyAgent` = one Durable Object per user (routed by name; single-user demo seeds id "me").
- * State split (fleshed out in M1/M2):
+ * State split:
  *   - Agent state (setState): lifter · program · activeSession  → hot, auto-persisted, WS-broadcast
  *   - Embedded SQLite (this.sql): sessions → append-only history
  *
- * M0 scope: the agent exists as a DO and chat round-trips to Heroku through the AI Gateway.
+ * SOURCE OF TRUTH: the seed below is derived by hand from two files committed in this repo —
+ *   - prev-coach-handoff.md  (athlete profile, injuries, 3RM goals, detraining status)
+ *   - workout-log.csv        (the last real training block, Dec 2025 – Jan 2026)
+ * Seeding is ONE-TIME, gated by SEED_VERSION in the `meta` table — so program edits (M2) persist
+ * and never get clobbered on wake. Bump SEED_VERSION to intentionally re-seed.
  */
 
-// --- State shape (seeded in M1; declared now so the class type is stable) ---
+// --- State shape ---
+export type Lift = {
+	exercise: string;
+	sets: number;
+	reps: number;
+	weight?: number; // lb; omitted for bodyweight work
+	perSide?: boolean; // load/reps are per side (step-ups, split squats)
+	kind?: "rounds"; // circuit measured in rounds, not sets×reps
+	note?: string;
+};
+
 export type PrescribedDay = {
-	day: string;
-	focus: string;
-	lifts: { exercise: string; sets: number; reps: number; weight?: number }[];
+	day: string; // "Day A"
+	focus: string; // "Front Squat"
+	lifts: Lift[];
+};
+
+export type MainLift = {
+	name: string;
+	goal3RM: number;
+	decemberBest: string;
+	rebuildOpener: number;
 };
 
 export type State = {
 	lifter: {
-		prs: Record<string, number>;
-		trainingMaxes: Record<string, number>;
-		bodyweight?: number;
-		injuries?: string[];
+		name: string;
+		height: string;
+		bodyweight: number;
+		diet: string;
+		status: string;
+		injuries: string[];
+		mains: MainLift[];
 	};
 	program: {
 		phase: string;
@@ -40,39 +65,182 @@ export type State = {
 	};
 };
 
-const INITIAL_STATE: State = {
-	lifter: { prs: {}, trainingMaxes: {}, injuries: [] },
-	program: { phase: "unset", goal: "unset", weekIndex: 0, days: [] },
+// --- Seed derived from prev-coach-handoff.md + workout-log.csv ---
+const SEED_VERSION = 1;
+
+const SEED_STATE: State = {
+	lifter: {
+		name: "Ethan",
+		height: `5'9"`,
+		bodyweight: 160,
+		diet: "vegetarian (160g protein training days / 128g rest)",
+		status:
+			"Detrained after several endurance-focused blocks. December numbers are stale — retest pending. This block reaccumulates conservatively toward December working weights before chasing 3RM goals.",
+		injuries: [
+			"Right ankle: torn lateral ligaments (rehabbed). Residual inversion sensitivity flares on deep front squat + hang clean catch — brace and back off if it flares.",
+			"Prior 3-week illness earlier in the year cost strength.",
+		],
+		mains: [
+			{ name: "Front Squat", goal3RM: 225, decemberBest: "4×7 @ 155 (+ pause 135×5)", rebuildOpener: 125 },
+			{ name: "Incline Bench", goal3RM: 170, decemberBest: "4×5–6 @ 115 (weak point)", rebuildOpener: 95 },
+			{ name: "Hang Clean", goal3RM: 185, decemberBest: "5×4 @ 125", rebuildOpener: 105 },
+		],
+	},
+	program: {
+		phase: "Rebuild · reaccumulation (3-day A/B/C)",
+		goal: "Rebuild to December working weights (FS 4×7 @155 · Incline 4×6 @115 · Hang Clean 5×4 @125), then progress toward 3RM goals: FS 225 · Incline 170 · Hang Clean 185.",
+		weekIndex: 1,
+		days: [
+			{
+				day: "Day A",
+				focus: "Front Squat",
+				lifts: [
+					{ exercise: "Front Squat", sets: 4, reps: 8, weight: 125, note: "reaccumulation opener · below Dec 145 · controlled depth, brace ankle" },
+					{ exercise: "Pause Front Squat (2s)", sets: 3, reps: 5, weight: 105 },
+					{ exercise: "Romanian Deadlift", sets: 4, reps: 8, weight: 115 },
+					{ exercise: "Weighted Step-ups", sets: 3, reps: 8, weight: 25, perSide: true },
+					{ exercise: "Pull-ups", sets: 4, reps: 6 },
+					{ exercise: "Bulgarian Split Squats", sets: 3, reps: 8, weight: 30, perSide: true },
+					{ exercise: "Standing Calf Raises", sets: 4, reps: 15, weight: 45 },
+					{ exercise: "Core Circuit", sets: 3, reps: 0, kind: "rounds" },
+				],
+			},
+			{
+				day: "Day B",
+				focus: "Incline Bench",
+				lifts: [
+					{ exercise: "Incline Bench", sets: 4, reps: 8, weight: 95, note: "known weak point — reps clean, leave 2 in the tank" },
+					{ exercise: "Close-Grip Incline Press", sets: 3, reps: 8, weight: 75 },
+					{ exercise: "Barbell Row", sets: 4, reps: 8, weight: 95 },
+					{ exercise: "Dips", sets: 3, reps: 10 },
+					{ exercise: "Seated DB Press", sets: 3, reps: 10, weight: 30, note: "reduced load on return from layoff" },
+					{ exercise: "Lateral Raises", sets: 3, reps: 12, weight: 15 },
+					{ exercise: "Face Pulls", sets: 3, reps: 15, weight: 30 },
+					{ exercise: "Core Circuit", sets: 3, reps: 0, kind: "rounds" },
+				],
+			},
+			{
+				day: "Day C",
+				focus: "Hang Clean",
+				lifts: [
+					{ exercise: "Hang Clean", sets: 5, reps: 3, weight: 105, note: "technique priority · stop if ankle catch flares · clean pulls only if catch degrades" },
+					{ exercise: "Hang Clean Pulls", sets: 4, reps: 3, weight: 125 },
+					{ exercise: "Front Squat (lighter)", sets: 3, reps: 6, weight: 115 },
+					{ exercise: "Pull-ups", sets: 4, reps: 6 },
+					{ exercise: "Weighted Step-ups", sets: 3, reps: 8, weight: 25, perSide: true },
+					{ exercise: "EZ Bar Curls", sets: 3, reps: 10, weight: 45 },
+					{ exercise: "Rope Pushdowns", sets: 3, reps: 10, weight: 35 },
+					{ exercise: "Core Circuit", sets: 3, reps: 0, kind: "rounds" },
+				],
+			},
+		],
+	},
 	activeSession: null,
 };
 
-const COACH_SYSTEM = `You are liftty, a concise strength coach for one lifter.
-You speak plainly, reference the lifter's real numbers, and never invent PRs.
-In M0 you have no tools yet — just answer coaching questions directly.`;
+export type SessionRow = {
+	id: string;
+	date: string;
+	status: string;
+	prescribed: string; // JSON
+	actuals: string; // JSON: { focus, summary, week, day }
+};
+
+// The real logged block from workout-log.csv (Dec 2025 – Jan 2026), summarized per day.
+const SEED_SESSIONS: { id: string; date: string; week: number; day: string; focus: string; summary: string }[] = [
+	{ id: "2025-12-29-A", date: "2025-12-29", week: 1, day: "Day A", focus: "Front Squat", summary: "Front Squat 4×7–8 @ 145 · pause FS 3×5 @125 · RDL 4×8 @135. Right hamstring tightness." },
+	{ id: "2025-12-29-B", date: "2025-12-29", week: 1, day: "Day B", focus: "Incline Bench", summary: "Incline Bench 4×7 @ 105 · Barbell Row 4×8 @105 · Dips 3×10. Last set a grind." },
+	{ id: "2026-01-05-C", date: "2026-01-05", week: 1, day: "Day C", focus: "Hang Clean", summary: "Hang Clean 5×4 @ 120 · Clean Pulls 4×3–4 @140 · light FS 3×6 @135." },
+	{ id: "2026-01-07-A", date: "2026-01-07", week: 2, day: "Day A", focus: "Front Squat", summary: "Front Squat 4×7 @ 150 · pause FS 3×5 @130 · RDL 4×8 @140." },
+	{ id: "2026-01-10-B", date: "2026-01-10", week: 2, day: "Day B", focus: "Incline Bench", summary: "Incline Bench 4×6 @ 110 · Barbell Row 4×6–7 @115 · Dips 3×10." },
+	{ id: "2026-01-14-A", date: "2026-01-14", week: 3, day: "Day A", focus: "Front Squat", summary: "Front Squat 4×7 @ 155 (block best) · pause FS 3×5 @135 · RDL 4×8 @145 · weighted pull-ups +17.5." },
+	{ id: "2026-01-16-B", date: "2026-01-16", week: 3, day: "Day B", focus: "Incline Bench", summary: "Incline Bench 4×5–6 @ 115 (hard, block best) · Barbell Row 4×8 @115 · Dips 3×10." },
+	{ id: "2026-01-21-C", date: "2026-01-21", week: 2, day: "Day C", focus: "Hang Clean", summary: "Hang Clean 5×4 @ 125 (block best) · Clean Pulls 4×3 @145 · light FS 3×6 @140." },
+];
+
+/** Build the coach system prompt from live state — injects injury constraints + real numbers. */
+function coachSystem(s: State): string {
+	const L = s.lifter;
+	const goals = L.mains.map((m) => `${m.name} 3RM ${m.goal3RM} (Dec best ${m.decemberBest})`).join("; ");
+	const injuries = L.injuries.length ? L.injuries.map((i) => `- ${i}`).join("\n") : "- none noted";
+	return `You are liftty, a concise strength coach for ${L.name}.
+Speak plainly, reference the lifter's real numbers, and never invent PRs.
+
+Lifter: ${L.height}, ${L.bodyweight} lb, ${L.diet}.
+Status: ${L.status}
+Current block: ${s.program.phase} (week ${s.program.weekIndex}) — ${s.program.goal}
+Goals: ${goals}
+
+Injury constraints — RESPECT THESE. Do not program or encourage contraindicated work:
+${injuries}
+
+When asked to program or adjust, honor the injury constraints and the current rebuild intent.`;
+}
+
+/** Which program day is "today": the one after the most recently logged session's focus. */
+function todayIndex(days: PrescribedDay[], recent: SessionRow[]): number {
+	if (!days.length || !recent.length) return 0;
+	try {
+		const last = JSON.parse(recent[0].actuals) as { focus?: string };
+		const i = days.findIndex((d) => d.focus === last.focus);
+		if (i >= 0) return (i + 1) % days.length;
+	} catch {
+		/* fall through */
+	}
+	return 0;
+}
 
 export class LifttyAgent extends Agent<Env, State> {
-	initialState = INITIAL_STATE;
+	initialState = SEED_STATE;
 
-	/**
-	 * Chat round-trip (M0). POST { message } → coach reply.
-	 * Reached via routeAgentRequest at /agents/liftty-agent/:name (e.g. /agents/liftty-agent/me).
-	 */
+	/** Runs on every wake (idempotent). Create tables; seed state + history ONCE per SEED_VERSION. */
+	async onStart() {
+		this.sql`CREATE TABLE IF NOT EXISTS sessions (
+			id TEXT PRIMARY KEY,
+			date TEXT NOT NULL,
+			status TEXT NOT NULL,
+			prescribed TEXT NOT NULL DEFAULT '{}',
+			actuals TEXT NOT NULL DEFAULT '{}'
+		)`;
+		this.sql`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`;
+
+		const [row] = this.sql<{ value: string }>`SELECT value FROM meta WHERE key = 'seed_version'`;
+		const seeded = row ? parseInt(row.value, 10) : 0;
+		if (seeded >= SEED_VERSION) return; // already seeded — never clobber real edits
+
+		this.setState(SEED_STATE);
+		for (const s of SEED_SESSIONS) {
+			const actuals = JSON.stringify({ focus: s.focus, summary: s.summary, week: s.week, day: s.day });
+			// Upsert so a SEED_VERSION bump refreshes seeded rows (e.g. new actuals fields).
+			this.sql`INSERT INTO sessions (id, date, status, prescribed, actuals)
+				VALUES (${s.id}, ${s.date}, ${"completed"}, ${"{}"}, ${actuals})
+				ON CONFLICT(id) DO UPDATE SET date = excluded.date, status = excluded.status, actuals = excluded.actuals`;
+		}
+		this.sql`INSERT INTO meta (key, value) VALUES ('seed_version', ${String(SEED_VERSION)})
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value`;
+	}
+
+	/** RPC: everything the /plan view needs, in one round-trip. */
+	async getPlanData(): Promise<{ state: State; recentSessions: SessionRow[]; today: number }> {
+		const recentSessions = this.sql<SessionRow>`
+			SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 10`;
+		return { state: this.state, recentSessions, today: todayIndex(this.state.program.days, recentSessions) };
+	}
+
+	/** Chat round-trip. POST { message } → coach reply. Coach is injury-aware via live state. */
 	async onRequest(request: Request): Promise<Response> {
 		if (request.method !== "POST") {
 			return Response.json({ error: "POST { message } here" }, { status: 405 });
 		}
-
 		const { message } = (await request.json()) as { message?: string };
 		if (!message) {
 			return Response.json({ error: "missing 'message'" }, { status: 400 });
 		}
-
 		const { text } = await generateText({
 			model: getModel(this.env),
-			system: COACH_SYSTEM,
+			system: coachSystem(this.state),
 			prompt: message,
 		});
-
 		return Response.json({ reply: text });
 	}
 }
@@ -81,14 +249,15 @@ export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url);
 
-		// Server-rendered views land in M1 (/plan) and M4 (/session). Placeholder for now.
 		if (url.pathname === "/" || url.pathname === "/plan") {
-			return new Response(
-				"liftty — M0 up. Chat: POST /agents/liftty-agent/me { message }",
-				{ headers: { "content-type": "text/plain" } },
-			);
+			const me = await getAgentByName(env.LifttyAgent, "me");
+			const data = await me.getPlanData();
+			return new Response(renderPlan(data), {
+				headers: { "content-type": "text/html; charset=utf-8" },
+			});
 		}
 
+		// /session lands in M4.
 		return (
 			(await routeAgentRequest(request, env)) ||
 			new Response("Not found", { status: 404 })
