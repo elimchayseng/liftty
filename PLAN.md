@@ -2,17 +2,17 @@
 
 ## Context
 
-Re-platform a single-user weightlifting tracker into a **stateful coaching agent** on Cloudflare Workers for an interview demo. One `Agent` subclass = one Durable Object per user (id `"me"`, but routed by name so per-user isolation is real). Demonstrates: (a) per-user persistent agent state, (b) live workout session over WebSocket with hibernation + alarms, (c) **Code Mode** tool design — 4 typed methods the agent writes code against, not 14 wrapper tools. Deliberately contrasts the prior running-coach app (Flask/Railway, SQLite-on-volume, Redis, cron threads, ~14 tools).
+Re-platform a single-user weightlifting tracker into a **stateful coaching agent** on Cloudflare Workers. One `Agent` subclass = one Durable Object per user (id `"me"`, but routed by name so per-user isolation is real). Demonstrates: (a) per-user persistent agent state, (b) live workout session over WebSocket with hibernation + alarms, (c) **Code Mode** tool design — 4 typed methods the agent writes code against, not 14 wrapper tools. Contrasts a prior running-coach app (Flask/Railway, SQLite-on-volume, Redis, cron threads, ~14 tools) to show the same class of app on a stateful-agent architecture.
 
-**User constraints:** 1-day crunch. Only Heroku inference creds in hand — Workers Paid + AI Gateway still need provisioning. Frontend = server-rendered HTML, no framework. First commit = this plan as `PLAN.md` in the repo, then build.
+**Constraints:** 1-day build. Only Heroku inference creds in hand — Workers Paid + AI Gateway still need provisioning. Frontend = server-rendered HTML, no framework.
 
-**1-day strategy:** Guaranteed demo = Phases 0–4 (provision → M0 → M1 → M2 → M4). Code Mode (M3) is a **90-min hard timebox** in Phase 5 with the M2 fallback pre-wired — the typed-interface *doctrine* is demonstrated either way; only sandboxed execution is deferred. Friction log is written continuously, not at the end.
+**1-day sequencing:** Guaranteed path = Phases 0–4 (provision → M0 → M1 → M2 → M4). Code Mode (M3) is a **90-min hard timebox** in Phase 5 with the M2 fallback pre-wired — the typed-interface design holds either way; only sandboxed execution is deferred. Friction log is written continuously, not at the end.
 
 ---
 
 ## Architecture diagrams & flows
 
-> These are the interview whiteboard. Every box is labeled with the Cloudflare product doing the work. Mermaid renders in GitHub, VS Code, and most markdown viewers.
+> Every box is labeled with the Cloudflare product doing the work. Mermaid renders in GitHub, VS Code, and most markdown viewers.
 
 ### 1. System architecture — what runs where
 
@@ -110,7 +110,7 @@ sequenceDiagram
     P->>A: next set… (loop)
 ```
 
-**The point to say out loud:** the socket is open for the whole workout, but between sets the object hibernates — you only pay compute when a set actually lands or a timer fires. On Railway that was a thread sitting in a `while` loop.
+**Note:** the socket is open for the whole workout, but between sets the object hibernates — compute is billed only when a set lands or a timer fires. The Railway equivalent was a thread sitting in a `while` loop.
 
 ### 4. Inference path — model is BYO, control plane is Cloudflare
 
@@ -127,7 +127,7 @@ flowchart LR
     class H hk;
 ```
 
-**Deliberate tradeoff (say this):** Heroku stays the model so existing billing is untouched; AI Gateway is the Cloudflare-native control plane bolted in front — swappable provider boundary, logs, spend caps — without changing the model.
+**Deliberate tradeoff:** Heroku stays the model so existing billing is untouched; AI Gateway is the Cloudflare-native control plane in front — swappable provider boundary, logs, spend caps — without changing the model.
 
 ### 5. Code Mode — 4 typed tools, one code snippet (M3 centerpiece)
 
@@ -145,13 +145,13 @@ flowchart TB
     class S,T cf;
 ```
 
-**Contrast line:** 14 wrapper tools + one call at a time → **1 typed interface the model writes code against**; a 3-step request is one snippet, and only the result re-enters context, not each intermediate tool call.
+**Contrast:** 14 wrapper tools + one call at a time → **1 typed interface the model writes code against**; a 3-step request is one snippet, and only the result re-enters context, not each intermediate tool call.
 
 ---
 
 ## Doc-drift findings (verified against live Cloudflare docs, 2026-07-06)
 
-These correct the brief's `[DOCS]` placeholders — **interview gold: the brief was right to distrust training data.**
+These correct the brief's `[DOCS]` placeholders — a concrete reminder to fetch current docs at runtime rather than trusting training data for fast-moving beta APIs.
 
 | Brief assumed | Current reality |
 |---|---|
@@ -171,9 +171,9 @@ Other confirmed syntax: `this.sql` template tag (auto-parameterized); `this.sche
 
 1. **Skip the agents-starter template.** It's Vite+React now. Scaffold hello-world + `npm i agents`. Less to rip out, matches server-rendered frontend, and shows you know what the starter actually contains.
 2. **Drop the `reviews` table from v1.** Only `sessions` is needed for every acceptance check. Coach critique lives in chat output. Add back only if time remains.
-3. **Skip AI Gateway response caching.** Known sharp edge; *talking* about the caching caveat in the friction log is better interview material than a half-verified cache. (Do check whether `cache_control` reaches Heroku in gateway logs — 5 min, great friction-log entry.)
+3. **Skip AI Gateway response caching.** Known sharp edge; document the caching caveat in the friction log rather than shipping a half-verified cache. (Do check whether `cache_control` reaches Heroku in gateway logs — 5 min, good friction-log entry.)
 4. **Plain `Agent`, not `AIChatAgent`.** `@cloudflare/ai-chat` (the new home of the chat agent) is built around React hooks + streaming UI you won't use. Chat = one HTTP/WS handler + Vercel AI SDK `generateText` with an OpenAI-compatible provider pointed at the gateway.
-5. **One agent class, everything in it.** No sub-agents, no queues, no email channels — the SDK has them all now; name-dropping that you *chose not to* use them is the flex.
+5. **One agent class, everything in it.** No sub-agents, no queues, no email channels — the SDK has them all now, but v1 stays deliberately scoped to a single agent.
 
 ---
 
@@ -216,7 +216,7 @@ npm i agents ai @ai-sdk/openai-compatible zod
     "$schema": "node_modules/wrangler/config-schema.json",
     "name": "liftty",
     "main": "src/server.ts",
-    "compatibility_date": "2026-07-06",
+    "compatibility_date": "2026-03-10",
     "compatibility_flags": ["nodejs_compat"],
     "durable_objects": { "bindings": [{ "name": "LifttyAgent", "class_name": "LifttyAgent" }] },
     "migrations": [{ "tag": "v1", "new_sqlite_classes": ["LifttyAgent"] }],
@@ -273,7 +273,7 @@ npm i @cloudflare/codemode@latest
   const codemode = createCodeTool({ tools: trainingTools, executor });
   // generateText({ ..., tools: { codemode }, stopWhen: stepCountIs(5) })
   ```
-  (Sandbox: capability-based, `globalOutbound: null` — no network; tool calls cross back via Workers RPC. Say exactly this sentence in the interview.)
+  (Sandbox: capability-based, `globalOutbound: null` — no network; tool calls cross back via Workers RPC.)
 - Test the money prompt: *"log today's squats: 5x225, 5x225, 8x225 — did I PR? if my top set beat my TM, bump next week's squat TM 5lb."*
 - *Accept (M3):* one `codemode` tool call, one code snippet in logs, only the final result returns to context.
 - **Fallback at minute 90:** `git checkout m2-baseline` chat path (keep a feature flag or branch), log exactly where the DX bit (bundling? RPC types? beta error message?) — that friction entry is as valuable as the working feature.
@@ -286,10 +286,6 @@ npm i @cloudflare/codemode@latest
 - *Accept (M5):* full loop (plan → session → sets → timer → coach chat → program change) works on your phone; friction log written.
 
 ---
-
-## Interview framing (unchanged from brief — rehearse against the built thing)
-
-"14 tools + SQLite-volume + Redis + cron threads + watchdog + manual backups → one Durable Object and a 4-method typed API the agent writes code against." Hand over the friction log. The doc-drift table above is a live example of why the brief said fetch docs at runtime — use it.
 
 ## Verification
 
