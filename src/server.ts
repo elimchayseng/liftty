@@ -250,6 +250,11 @@ export class LifttyAgent extends Agent<Env, State> implements Training {
 	}
 
 	logSet(set: SetInput): { activeSets: number; message: string } {
+		// Code Mode lets the model pass computed values straight in, and jsonSchema() bounds are NOT
+		// enforced at runtime — validate here. (A NaN weight would survive `?? 0` and then serialize
+		// to null in storage; a non-positive/non-integer rep count is meaningless.)
+		if (!Number.isInteger(set.reps) || set.reps < 1) throw new Error(`logSet: reps must be a positive integer (got ${set.reps})`);
+		if (set.weight != null && !Number.isFinite(set.weight)) throw new Error(`logSet: weight must be a finite number (got ${set.weight})`);
 		let active = this.state.activeSession;
 		if (!active) {
 			const recent = this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 1`;
@@ -359,38 +364,55 @@ export class LifttyAgent extends Agent<Env, State> implements Training {
 		if (request.method !== "POST") {
 			return Response.json({ error: "POST { message } here" }, { status: 405 });
 		}
-		const { message, mode } = (await request.json()) as { message?: string; mode?: "codemode" | "tools" };
+		let body: { message?: string; mode?: "codemode" | "tools" };
+		try {
+			body = (await request.json()) as { message?: string; mode?: "codemode" | "tools" };
+		} catch {
+			return Response.json({ error: "body must be JSON: { message, mode? }" }, { status: 400 });
+		}
+		const { message, mode } = body;
 		if (!message) {
 			return Response.json({ error: "missing 'message'" }, { status: 400 });
 		}
 		const useCodeMode = mode !== "tools"; // Code Mode is the default (M3); pass mode:"tools" to fall back
 
-		const result = await generateText({
-			model: getModel(this.env),
-			system: coachSystem(this.state) + (useCodeMode ? CODEMODE_HINT : ""),
-			prompt: message,
-			tools: useCodeMode ? buildCodeModeTool(this, this.env.LOADER) : buildTrainingTools(this),
-			// Code Mode collapses a multi-step request into one snippet, so fewer model steps are needed.
-			stopWhen: stepCountIs(useCodeMode ? 5 : 8),
-		});
+		try {
+			const result = await generateText({
+				model: getModel(this.env),
+				system: coachSystem(this.state) + (useCodeMode ? CODEMODE_HINT : ""),
+				prompt: message,
+				tools: useCodeMode ? buildCodeModeTool(this, this.env.LOADER) : buildTrainingTools(this),
+				// Code Mode collapses a multi-step request into one snippet, so fewer model steps are needed.
+				stopWhen: stepCountIs(useCodeMode ? 5 : 8),
+			});
 
-		// Surface which tools ran across all steps. In Code Mode this is ["codemode"] even when the
-		// snippet made several training.* calls — the whole point: one call, not four round-trips.
-		const toolsUsed = result.steps.flatMap((s) => s.toolCalls.map((c) => c.toolName));
-		// Pull the JS snippet(s) the coach wrote (the codemode tool input) — the demo shows this.
-		const code = result.steps
-			.flatMap((s) => s.toolCalls)
-			.filter((c) => c.toolName === "codemode")
-			.map((c) => (c.input as { code?: string }).code)
-			.filter((c): c is string => typeof c === "string");
+			// Surface which tools ran across all steps. In Code Mode this is ["codemode"] even when the
+			// snippet made several training.* calls — the whole point: one call, not four round-trips.
+			const toolsUsed = result.steps.flatMap((s) => s.toolCalls.map((c) => c.toolName));
+			// Pull the JS snippet(s) the coach wrote (the codemode tool input) — the demo shows this.
+			const code = result.steps
+				.flatMap((s) => s.toolCalls)
+				.filter((c) => c.toolName === "codemode")
+				.map((c) => (c.input as { code?: string }).code)
+				.filter((c): c is string => typeof c === "string");
 
-		return Response.json({
-			reply: result.text,
-			mode: useCodeMode ? "codemode" : "tools",
-			toolsUsed,
-			steps: result.steps.length,
-			...(code.length ? { code } : {}),
-		});
+			return Response.json({
+				reply: result.text,
+				mode: useCodeMode ? "codemode" : "tools",
+				toolsUsed,
+				steps: result.steps.length,
+				...(code.length ? { code } : {}),
+			});
+		} catch (err) {
+			// New failure surface under Code Mode: a sandbox load/entitlement error (e.g. LOADER not
+			// provisioned), an AI Gateway hiccup, or a model-written snippet that won't run. Return a
+			// clean message instead of a framework 500 dumping a stack trace to the client.
+			console.error("chat onRequest failed:", err);
+			return Response.json(
+				{ error: "coach request failed to complete", mode: useCodeMode ? "codemode" : "tools" },
+				{ status: 502 },
+			);
+		}
 	}
 }
 
