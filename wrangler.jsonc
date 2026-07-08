@@ -9,6 +9,10 @@
 		"bindings": [{ "name": "LifttyAgent", "class_name": "LifttyAgent" }],
 	},
 	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["LifttyAgent"] }],
+	// Code Mode (M3): Dynamic Worker Loader sandbox. The agent writes ONE code snippet against the
+	// typed Training API; each call inside it dispatches back to the DO via Workers RPC. Open beta on
+	// all Workers Paid accounts (no waitlist); `wrangler dev` supports the binding locally.
+	"worker_loaders": [{ "binding": "LOADER" }],
 	"vars": {
 		// Non-secret config. Fill CF_ACCOUNT_ID from Phase 0 (`wrangler whoami` or AI Gateway endpoint).
 		// Secrets (not here): HEROKU_INFERENCE_KEY (required) → `wrangler secret put HEROKU_INFERENCE_KEY`.

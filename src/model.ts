@@ -18,12 +18,31 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
  *     needed if you enable "Authenticated Gateway". Left unset for the demo (the Heroku key is the
  *     real gate). Set `AIG_TOKEN` later to harden.
  */
+/** Recursively delete every `$schema` key in place. See shim reason (2) below. */
+function stripSchemaKeys(value: unknown): void {
+	if (Array.isArray(value)) {
+		for (const v of value) stripSchemaKeys(v);
+	} else if (value && typeof value === "object") {
+		delete (value as Record<string, unknown>).$schema;
+		for (const v of Object.values(value as Record<string, unknown>)) stripSchemaKeys(v);
+	}
+}
+
 /**
- * Compat shim: Heroku's Anthropic-backed endpoint requires every message to have NON-EMPTY
- * content ("messages[N]: content is required"). The AI SDK emits empty/null content for assistant
- * messages that carry only tool_calls (no preamble text). Anthropic also rejects whitespace-only
- * text blocks, so we substitute a minimal non-whitespace placeholder. This message is an
- * intermediate tool-turn the user never sees (the final reply is returned separately).
+ * Compat shim for Heroku's Anthropic-backed endpoint. Two fixes on the outgoing request body:
+ *
+ * (1) Every message must have NON-EMPTY content ("messages[N]: content is required"). The AI SDK
+ *     emits empty/null content for assistant messages carrying only tool_calls (no preamble text);
+ *     Anthropic also rejects whitespace-only text blocks. We substitute a minimal non-whitespace
+ *     placeholder on those intermediate tool-turns (the user never sees them; the final reply is
+ *     returned separately).
+ *
+ * (2) No `$schema` anywhere in tool parameter schemas ("unrecognized request argument: $schema").
+ *     Our four training tools dodge this by hand-writing JSON Schema, but Code Mode's generated
+ *     `codemode` tool (@cloudflare/codemode) builds its own StandardSchema that re-emits a top-level
+ *     `$schema`. Rather than special-case one tool, strip `$schema` recursively — it is pure
+ *     JSON-Schema dialect metadata and always safe to drop for Anthropic. Same root cause as the
+ *     zod-v4 `$schema` friction from M2, now reintroduced by the Code Mode tool wrapper.
  */
 const patchedFetch: typeof fetch = async (input, init) => {
 	if (init?.body && typeof init.body === "string") {
@@ -33,8 +52,9 @@ const patchedFetch: typeof fetch = async (input, init) => {
 				for (const m of body.messages) {
 					if (m && (m.content == null || m.content === "")) m.content = ".";
 				}
-				init = { ...init, body: JSON.stringify(body) };
 			}
+			stripSchemaKeys(body);
+			init = { ...init, body: JSON.stringify(body) };
 		} catch {
 			/* not JSON — pass through untouched */
 		}

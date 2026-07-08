@@ -3,6 +3,7 @@ import { generateText, stepCountIs } from "ai";
 import { getModel } from "./model";
 import { renderPlan } from "./views/plan";
 import { renderChat } from "./views/chat";
+import { buildCodeModeTool } from "./codemode";
 import {
 	buildTrainingTools,
 	type Training,
@@ -187,6 +188,19 @@ ${injuries}
 When asked to program or adjust, honor the injury constraints and the current rebuild intent.`;
 }
 
+/**
+ * Appended to the system prompt in Code Mode (M3). The `codemode` tool's own description already
+ * teaches the mechanics (write an async arrow fn, return the result, no TS syntax); this just tells
+ * the coach WHEN to reach for it and to prefer one snippet over several separate calls.
+ */
+const CODEMODE_HINT = `
+
+You have one tool, \`codemode\`, exposing the typed training API as \`training.*\`. Whenever you need
+to read the program/history or log sets or adjust the program, call \`codemode\` with a SINGLE async
+JS snippet that does the whole task — read, compute, and write in one snippet — and return a small
+result object. Prefer one snippet over multiple tool calls. Then answer the lifter in plain language,
+reporting only what actually changed (e.g. the exact exercises \`adjustProgram\` returned).`;
+
 /** Which program day is "today": the one after the most recently logged session's focus. */
 function todayIndex(days: PrescribedDay[], recent: SessionRow[]): number {
 	if (!days.length || !recent.length) return 0;
@@ -236,6 +250,11 @@ export class LifttyAgent extends Agent<Env, State> implements Training {
 	}
 
 	logSet(set: SetInput): { activeSets: number; message: string } {
+		// Code Mode lets the model pass computed values straight in, and jsonSchema() bounds are NOT
+		// enforced at runtime — validate here. (A NaN weight would survive `?? 0` and then serialize
+		// to null in storage; a non-positive/non-integer rep count is meaningless.)
+		if (!Number.isInteger(set.reps) || set.reps < 1) throw new Error(`logSet: reps must be a positive integer (got ${set.reps})`);
+		if (set.weight != null && !Number.isFinite(set.weight)) throw new Error(`logSet: weight must be a finite number (got ${set.weight})`);
 		let active = this.state.activeSession;
 		if (!active) {
 			const recent = this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 1`;
@@ -332,28 +351,68 @@ export class LifttyAgent extends Agent<Env, State> implements Training {
 	}
 
 	/**
-	 * Chat round-trip (M2). POST { message } → coach reply.
-	 * The coach reads/mutates via the four typed Training tools; injury-aware via live state.
+	 * Chat round-trip. POST { message, mode? } → coach reply.
+	 * The coach reads/mutates via the four typed Training methods; injury-aware via live state.
+	 *
+	 *   - mode "codemode" (default, M3): one `codemode` tool — the coach writes a single JS snippet
+	 *     against `training.*`, run in a Dynamic Worker Loader sandbox, calls dispatched back via RPC.
+	 *   - mode "tools" (M2 baseline, fallback): four AI SDK tools, called one at a time.
+	 *
+	 * Both drive the SAME typed interface — only the execution path differs (see src/codemode.ts).
 	 */
 	async onRequest(request: Request): Promise<Response> {
 		if (request.method !== "POST") {
 			return Response.json({ error: "POST { message } here" }, { status: 405 });
 		}
-		const { message } = (await request.json()) as { message?: string };
+		let body: { message?: string; mode?: "codemode" | "tools" };
+		try {
+			body = (await request.json()) as { message?: string; mode?: "codemode" | "tools" };
+		} catch {
+			return Response.json({ error: "body must be JSON: { message, mode? }" }, { status: 400 });
+		}
+		const { message, mode } = body;
 		if (!message) {
 			return Response.json({ error: "missing 'message'" }, { status: 400 });
 		}
-		const result = await generateText({
-			model: getModel(this.env),
-			system: coachSystem(this.state),
-			prompt: message,
-			tools: buildTrainingTools(this),
-			stopWhen: stepCountIs(8),
-		});
-		// Surface which tools ran (across all steps) — useful for the demo, and the exact place
-		// M3 will show "one codemode call" collapsing what is several tool calls here.
-		const toolsUsed = result.steps.flatMap((s) => s.toolCalls.map((c) => c.toolName));
-		return Response.json({ reply: result.text, toolsUsed, steps: result.steps.length });
+		const useCodeMode = mode !== "tools"; // Code Mode is the default (M3); pass mode:"tools" to fall back
+
+		try {
+			const result = await generateText({
+				model: getModel(this.env),
+				system: coachSystem(this.state) + (useCodeMode ? CODEMODE_HINT : ""),
+				prompt: message,
+				tools: useCodeMode ? buildCodeModeTool(this, this.env.LOADER) : buildTrainingTools(this),
+				// Code Mode collapses a multi-step request into one snippet, so fewer model steps are needed.
+				stopWhen: stepCountIs(useCodeMode ? 5 : 8),
+			});
+
+			// Surface which tools ran across all steps. In Code Mode this is ["codemode"] even when the
+			// snippet made several training.* calls — the whole point: one call, not four round-trips.
+			const toolsUsed = result.steps.flatMap((s) => s.toolCalls.map((c) => c.toolName));
+			// Pull the JS snippet(s) the coach wrote (the codemode tool input) — the demo shows this.
+			const code = result.steps
+				.flatMap((s) => s.toolCalls)
+				.filter((c) => c.toolName === "codemode")
+				.map((c) => (c.input as { code?: string }).code)
+				.filter((c): c is string => typeof c === "string");
+
+			return Response.json({
+				reply: result.text,
+				mode: useCodeMode ? "codemode" : "tools",
+				toolsUsed,
+				steps: result.steps.length,
+				...(code.length ? { code } : {}),
+			});
+		} catch (err) {
+			// New failure surface under Code Mode: a sandbox load/entitlement error (e.g. LOADER not
+			// provisioned), an AI Gateway hiccup, or a model-written snippet that won't run. Return a
+			// clean message instead of a framework 500 dumping a stack trace to the client.
+			console.error("chat onRequest failed:", err);
+			return Response.json(
+				{ error: "coach request failed to complete", mode: useCodeMode ? "codemode" : "tools" },
+				{ status: 502 },
+			);
+		}
 	}
 }
 
