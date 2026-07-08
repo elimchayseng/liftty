@@ -10,7 +10,7 @@ Re-platform a single-user weightlifting tracker into a **stateful coaching agent
 
 ---
 
-## Progress log (as of 2026-07-06)
+## Progress log (as of 2026-07-08)
 
 Live URL: **https://liftty.elimchayseng13.workers.dev** · repo `elimchayseng/liftty` · account `9897c3ca…143c` · AI Gateway `liftty` (custom provider `heroku`).
 
@@ -22,12 +22,12 @@ Live URL: **https://liftty.elimchayseng13.workers.dev** · repo `elimchayseng/li
 - **Review fixes (M1 + M2).** Ran `/review` after each; fixes applied: seed-once, injury-aware coach prompt, dynamic "Today", week-labeled history, `perSide`/`rounds` render flags; `adjustProgram` returns `changed[]`; `/plan` renders the in-progress `activeSession`; `/reseed?token=` admin reset (disabled unless `RESEED_TOKEN` secret set) for repeatable demos.
 - Open follow-ups: issues **#3** (getHistory 50-row prefetch) and **#4** (adjustProgram split validation) — low priority.
 
-**M3 — Code Mode (branch `m3-code-mode`, committed, NOT yet merged): DEPLOYED to prod + verified live. ✅**
+**M3 — Code Mode: DONE — merged to `main` (PR #5, merge `cbadc79`), live in prod. ✅** (branch `m3-code-mode` deleted.)
 - `src/codemode.ts`: `DynamicWorkerExecutor({ loader: LOADER, globalOutbound: null })` + `createCodeTool`, the four typed tools namespaced as `training.*` in the sandbox. `server.ts` `onRequest` gets a `mode` branch — `"codemode"` (default, M3) vs `"tools"` (M2 baseline, one-line fallback). `/chat` gained a Code Mode ↔ Tools toggle and renders the snippet the coach wrote. `worker_loaders` `LOADER` binding added.
 - **Verified live in prod** (version `f4ad7e36`): the money prompt returns one `codemode` tool call and one JS snippet against `training.*`, dispatched back to the DO over Workers RPC. Read (`getProgram`), write (`logSet`), and mutate (`adjustProgram`) all round-trip through the live Dynamic Worker Loader and persist to DO state — `/plan` showed the in-progress 225 session, then `/reseed` restored pristine 125. Injury/context awareness carries through: on the 225×8 prompt the coach refused to auto-bump a suspicious number for a detrained, ankle-injured lifter. Same behavior confirmed earlier under `wrangler dev`.
 - **Plan gate (resolved):** the first `wrangler deploy` failed with API error **10195 — "switch to a paid plan"**; Dynamic Worker Loader gates on **Workers Paid** and the account was on Free (M0–M2 shipped on Free because Workers + DO + SQLite don't require Paid). The PLAN's Phase 0 "Paid provisioned" note was inaccurate — the upgrade landed only now. After upgrading, redeploy succeeded.
 - **Reviewed pre-merge (`/review` + adversarial subagent).** Trust boundary is sound (sandbox `globalOutbound:null` + only the 4 `training.*` capability methods; snippet rendered to the browser via `textContent`, no XSS). Two safe fixes applied: `onRequest` now wraps `generateText` in try/catch (returns a clean 502 instead of dumping a stack trace — a bigger surface under Code Mode), and `logSet` validates reps/weight at runtime (`jsonSchema()` bounds aren't enforced, and a computed `NaN` weight would survive `?? 0` and serialize to `null`). The subagent's "do not merge" rested on a claimed lost-update race in `logSet`/`adjustProgram` — **false positive**: both methods are fully synchronous (no `await` between state read and `setState`), so RPC-dispatched calls execute atomically. **Accepted as known single-user-demo limitations (would matter multi-tenant):** (1) a snippet can call `training.*` unbounded — no per-execution budget in the `createCodeTool` path (the `maxExecutions` cap is on the durable runtime path we don't use); (3) the `$schema` strip walks the whole request body, not just `body.tools`; (4) a thrown-snippet's error text can reach the model → user (no secrets in the sandbox, so low impact); (7) `setExerciseWeight`'s substring match (already tracked as issue #4) is more likely to over-match under programmatic writes.
-- **Not yet done:** merge `m3-code-mode` → `main`.
+- **Merged** via PR #5 (2026-07-08). Local-only case-study page `code-mode-comparison.html` (M2-tools vs M3-Code-Mode side by side, incl. token-usage analysis) is gitignored, not committed.
 
 **Friction log so far (interview deliverable — finalize in M5 `FRICTION.md`):**
 1. **Docs drift is real.** Code Mode SDK was rewritten (`@cloudflare/codemode` v0.1.0, Feb 2026) — old `experimental_codemode` gone; agents-starter is now Vite+React; `onStateUpdate`→`onStateChanged`. Fetch-at-runtime paid off.
@@ -41,7 +41,13 @@ Live URL: **https://liftty.elimchayseng13.workers.dev** · repo `elimchayseng/li
 
 **Current prod state:** **M3 live** (version `f4ad7e36`), account now on **Workers Paid**. Seed is pristine (front squat opener 125, no active session — restored after the prod money-prompt test). `/reseed` disabled again (the `RESEED_TOKEN` secret set for the test was deleted afterward; re-add via `wrangler secret put RESEED_TOKEN` for repeatable demos).
 
-**Next: merge `m3-code-mode` → `main`**, then M4 (live WS session + hibernation + alarms) / M5 (polish + `FRICTION.md`).
+**Next: M4 — live workout session (WebSocket + hibernation + alarms).** Full spec in Phase 4 below. Start on a new branch `m4-live-session` off `main`. Shape:
+- On the `LifttyAgent` DO: `onConnect(connection, ctx)` → mark `activeSession`; `onMessage` handles `{type:"log_set", ...}` → `logSet()` (already built, now with runtime validation) → `setState` (auto-broadcasts to connected clients) → `this.schedule(restSeconds, "restOver", { exercise })`. Add `restOver(payload)` → `this.broadcast(JSON.stringify({type:"rest_over", ...}))`.
+- New `/session` route: server-rendered HTML + small inline `<script>` opening a raw `WebSocket` to `wss://<host>/agents/liftty-agent/me` (server.ts already falls through to `routeAgentRequest`). Set-logger buttons + a visible rest countdown. Reuse the `/plan` + `/chat` dark aesthetic.
+- Hibernation is automatic — the *work* is proving it: idle the phone mid-rest, watch `wrangler tail`, confirm the alarm still fires and the socket wakes (note any local-vs-prod difference → friction log). Opt out only via `static options = { hibernate: false }` (don't).
+- **Accept (M4):** phone → open `/session` → log a set → timer fires → idle between sets without burning duration → next set wakes it. Then `/review` → PR → merge → clean branch. M5 = polish + finalize `FRICTION.md`.
+
+State/tools to reuse: `logSet(set)` and the four typed methods are done; `activeSession` shape is `{ startedAt, day, loggedSets: [{exercise, reps, weight}] }`; `/plan` already renders an in-progress `activeSession`. Confirm the Agents SDK WS hooks are still named `onConnect`/`onMessage`/`onStateChanged` at build time (docs move fast — the M3 friction log caught two renames).
 
 ---
 
