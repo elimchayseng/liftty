@@ -24,6 +24,10 @@ export default defineWorkersConfig({
 		},
 		poolOptions: {
 			workers: {
+				// The plugin tests drive the raw Worker Loader (dynamic isolates) through DO RPC, which
+				// the per-test isolated-storage stacking can't tear down ("Isolated storage failed").
+				// We isolate instead by giving each test its own DO name, so opt out of stacked storage.
+				isolatedStorage: false,
 				wrangler: { configPath: "./wrangler.jsonc" },
 			},
 		},
