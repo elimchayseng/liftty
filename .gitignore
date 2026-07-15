@@ -168,3 +168,6 @@ dist
 
 # Local case-study reference (not committed)
 code-mode-comparison.html
+
+# Token-optimization harness output (measurements, optimizer traces)
+results/

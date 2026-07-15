@@ -53,6 +53,13 @@ const patchedFetch: typeof fetch = async (input, init) => {
 					if (m && (m.content == null || m.content === "")) m.content = ".";
 				}
 			}
+			// (3) Streaming requests must opt in to a final usage chunk, or the response carries NO token
+			//     counts and AI Gateway logs 0 in / 0 out. The OpenAI-compatible flag for that is
+			//     `stream_options.include_usage`, which the AI SDK does not send by default. We stream to
+			//     dodge Heroku's non-streaming timeout, so we need this to keep the gateway measurement honest.
+			if (body?.stream === true) {
+				body.stream_options = { ...(body.stream_options ?? {}), include_usage: true };
+			}
 			stripSchemaKeys(body);
 			init = { ...init, body: JSON.stringify(body) };
 		} catch {
@@ -62,12 +69,32 @@ const patchedFetch: typeof fetch = async (input, init) => {
 	return fetch(input, init);
 };
 
-export function getModel(env: Env) {
+/**
+ * Optional per-flow measurement tag. When present, every model step in this flow rides a
+ * `cf-aig-metadata` header carrying `{ run_id, mode }`, so the token-optimization harness can
+ * group the flow's several gateway requests by `run_id` and sum input tokens. A fresh provider is
+ * built per `onRequest`, so this static header is set once and correctly scoped to one flow.
+ * Absent for normal chat — production traffic is byte-identical to before.
+ */
+export type RunTag = { runId: string; mode: "tools" | "codemode"; model?: string; variant?: string; decoys?: number };
+
+export function getModel(env: Env, run?: RunTag) {
 	const baseURL = `https://gateway.ai.cloudflare.com/v1/${env.CF_ACCOUNT_ID}/${env.AI_GATEWAY}/custom-${env.PROVIDER_SLUG}/v1`;
+	// Measured runs may override the model (to compare batching/token cost across models); normal chat
+	// uses the configured default.
+	const modelId = run?.model || env.MODEL;
 
 	const headers: Record<string, string> = {};
 	if (env.AIG_TOKEN) {
 		headers["cf-aig-authorization"] = `Bearer ${env.AIG_TOKEN}`;
+	}
+	if (run) {
+		// AI Gateway metadata: JSON object, string values, filterable in the logs API. The experiment
+		// axes (variant/decoys) are only included when defined, so an un-tagged run stays as before.
+		const metadata: Record<string, string | number> = { run_id: run.runId, mode: run.mode, model: modelId };
+		if (run.variant !== undefined) metadata.variant = run.variant;
+		if (run.decoys !== undefined) metadata.decoys = run.decoys;
+		headers["cf-aig-metadata"] = JSON.stringify(metadata);
 	}
 
 	const provider = createOpenAICompatible({
@@ -78,5 +105,5 @@ export function getModel(env: Env) {
 		fetch: patchedFetch,
 	});
 
-	return provider(env.MODEL);
+	return provider(modelId);
 }
