@@ -269,9 +269,10 @@ describe("liftty plugins (M5)", () => {
 	});
 });
 
-// FLOW-LIVE-EVENTS: /db read-only explorer + repeatable demo reset. DB_KEY comes from wrangler vars.
+// FLOW-LIVE-EVENTS: /db read-only explorer + repeatable demo reset. DB_KEY comes from the vitest
+// miniflare binding (vitest.config.mts), not a committed wrangler var — keep this constant in sync.
 describe("liftty /db explorer + demo reset (FLOW-LIVE-EVENTS)", () => {
-	const KEY = "liftty-db-demo";
+	const KEY = "test-db-key";
 
 	it("gates /db on the key (404 without / wrong, 200 with)", async () => {
 		expect((await SELF.fetch("https://example.com/db")).status).toBe(404);

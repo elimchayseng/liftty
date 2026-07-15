@@ -21,8 +21,9 @@
 		"AI_GATEWAY": "liftty",
 		"PROVIDER_SLUG": "heroku",
 		"MODEL": "claude-opus-4-8",
-		// FLOW-LIVE-EVENTS: key gating /db + /db.json + /reset-demo. Anything but this value 404s, so
-		// the explorer is invisible without it. Override in prod with `wrangler secret put DB_KEY`.
-		"DB_KEY": "liftty-db-demo",
+		// FLOW-LIVE-EVENTS: /db + /db.json + /reset-demo are gated by a DB_KEY *secret*, NOT a committed
+		// var — publishing the value would defeat the gate on these data-dumping endpoints. Set it per env:
+		// `wrangler secret put DB_KEY` for prod, DB_KEY=… in .dev.vars for local `wrangler dev`, and the
+		// vitest miniflare binding for tests. Unset = the endpoints 404 for everyone (fail-closed).
 	},
 }
