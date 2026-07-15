@@ -1,8 +1,9 @@
-import { Agent, getAgentByName, routeAgentRequest } from "agents";
+import { Agent, getAgentByName, routeAgentRequest, type Connection, type ConnectionContext, type WSMessage } from "agents";
 import { streamText, stepCountIs } from "ai";
 import { getModel } from "./model";
 import { renderPlan } from "./views/plan";
 import { renderChat } from "./views/chat";
+import { renderSession } from "./views/session";
 import { buildCodeModeTool } from "./codemode";
 import {
 	buildTrainingTools,
@@ -247,6 +248,12 @@ function computeSystem(state: State, useCodeMode: boolean, variant?: PromptVaria
 	return base;
 }
 
+/** Rest timer (seconds) for a logged set: client-supplied, clamped to a sane range; default 180. */
+function clampRest(rest?: number): number {
+	if (typeof rest !== "number" || !Number.isFinite(rest) || rest <= 0) return 180;
+	return Math.min(600, Math.max(5, Math.floor(rest)));
+}
+
 /** Which program day is "today": the one after the most recently logged session's focus. */
 function todayIndex(days: PrescribedDay[], recent: SessionRow[]): number {
 	if (!days.length || !recent.length) return 0;
@@ -348,6 +355,82 @@ export class LifttyAgent extends Agent<Env, State> implements Training {
 		}
 		this.setState({ ...this.state, program });
 		return { program: this.getProgram(), changed: [...new Set(changed)] };
+	}
+
+	// --- M4: live workout session over WebSocket (hibernation + alarms) ---
+	//
+	// The Agents SDK wraps `onConnect`/`onMessage`: its wrapper handles the framework's own protocol
+	// frames (state sync `cf_agent_state`, RPC) and forwards any OTHER message to the overrides below.
+	// So our custom `{type:"log_set"}` frames land here while `setState`'s auto-broadcast + RPC keep
+	// working untouched. Hibernation is automatic — between sets the DO sleeps; the socket stays open
+	// and the alarm (`schedule → restOver`) wakes it. Nothing here opts out (no `hibernate:false`).
+
+	/** The prescribed day treated as "today" — the day after the most recently logged session's focus. */
+	private todayDay(): PrescribedDay {
+		const recent = this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 1`;
+		return this.state.program.days[todayIndex(this.state.program.days, recent)];
+	}
+
+	/** A phone opening /session: ensure an active session exists, then send the prescribed day. */
+	async onConnect(connection: Connection, _ctx: ConnectionContext): Promise<void> {
+		const today = this.todayDay();
+		if (!this.state.activeSession) {
+			this.setState({
+				...this.state,
+				activeSession: { startedAt: new Date().toISOString(), day: today?.focus ?? "Session", loggedSets: [] },
+			});
+		}
+		const dayFocus = this.state.activeSession?.day ?? today?.focus;
+		const day = this.state.program.days.find((d) => d.focus === dayFocus) ?? today;
+		connection.send(
+			JSON.stringify({
+				type: "session_hello",
+				day: day?.focus ?? "Session",
+				dayLabel: day?.day ?? "",
+				lifts: day?.lifts ?? [],
+				activeSession: this.state.activeSession,
+			}),
+		);
+	}
+
+	/**
+	 * A logged set from the phone. This is the framing-correction-#2 dispatch site: the trigger is the
+	 * WS event, not an agent tool choice — no LLM call, no context window, anywhere on this path.
+	 * `logSet` (already validated) mutates state (auto-broadcast), then M5 plugins fire on the event,
+	 * then a rest alarm is scheduled.
+	 */
+	async onMessage(connection: Connection, message: WSMessage): Promise<void> {
+		let msg: { type?: string; exercise?: string; reps?: number; weight?: number; failed?: boolean; rest?: number };
+		try {
+			msg = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message));
+		} catch {
+			return; // non-JSON / binary — not ours (SDK protocol frames were handled by the wrapper)
+		}
+		if (msg.type !== "log_set") return;
+		try {
+			if (!msg.exercise || typeof msg.reps !== "number") {
+				connection.send(JSON.stringify({ type: "error", message: "log_set needs exercise + reps" }));
+				return;
+			}
+			const res = this.logSet({ exercise: msg.exercise, reps: msg.reps, weight: msg.weight });
+			connection.send(
+				JSON.stringify({ type: "set_logged", exercise: msg.exercise, reps: msg.reps, weight: msg.weight ?? null, failed: !!msg.failed, ...res }),
+			);
+
+			// M5 wires persistent, model-authored plugins in HERE — they fire on this event,
+			// deterministically, with zero tokens (see firePlugins()).
+
+			const rest = clampRest(msg.rest);
+			await this.schedule(rest, "restOver", { exercise: msg.exercise });
+			this.broadcast(JSON.stringify({ type: "rest_started", exercise: msg.exercise, seconds: rest }));
+		} catch (err) {
+			connection.send(JSON.stringify({ type: "error", message: err instanceof Error ? err.message : String(err) }));
+		}
+	}
+
+	/** Rest alarm fired (DO woke from hibernation): tell every connected client the timer is up. */
+	async restOver(payload: { exercise?: string }): Promise<void> {
+		this.broadcast(JSON.stringify({ type: "rest_over", exercise: payload?.exercise ?? null }));
 	}
 
 	/** Runs on every wake (idempotent). Create tables; seed state + history ONCE per SEED_VERSION. */
@@ -562,6 +645,12 @@ export default {
 			return new Response(renderChat(), { headers: { "content-type": "text/html; charset=utf-8" } });
 		}
 
+		// M4: the live workout stage. Server-rendered page opens a raw WS to the agent (routed by the
+		// routeAgentRequest fallthrough below at /agents/liftty-agent/me).
+		if (url.pathname === "/session") {
+			return new Response(renderSession(), { headers: { "content-type": "text/html; charset=utf-8" } });
+		}
+
 		// Admin reset for repeatable demos. Disabled unless RESEED_TOKEN is set (safe by default).
 		// Optional `&sessions=N` seeds N synthetic history rows on top of the pristine seed (study).
 		if (url.pathname === "/reseed") {
@@ -583,7 +672,7 @@ export default {
 			return Response.json(await me.dumpState());
 		}
 
-		// /session lands in M4.
+		// WS upgrades (/agents/liftty-agent/me from /session) + any other agent routes.
 		return (
 			(await routeAgentRequest(request, env)) ||
 			new Response("Not found", { status: 404 })
