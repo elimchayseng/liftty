@@ -1,0 +1,709 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>liftty · author once, execute forever</title>
+<style>
+  :root {
+    --void: #0a0613;
+    --void-2: #0f0819;
+    --panel: #150c26;
+    --panel-2: #1c1233;
+    --line: #2c1d4d;
+    --line-soft: #23163e;
+    --ink: #ded6f2;
+    --ink-2: #a99ecb;
+    --ink-dim: #7a6e9c;
+    --violet: #b06bff;
+    --violet-bright: #cd9bff;
+    --violet-deep: #7c46d6;
+    /* semantic — the thesis lives in these two */
+    --amber: #f2a03d;   /* inference · model in the loop · runs once */
+    --amber-dim: #6b4a1f;
+    --teal: #2fd6bd;    /* edge execution · model gone · runs forever */
+    --teal-dim: #1c5a52;
+    --heroku: #8b7ff2;  /* the BYO brain */
+    --heroku-deep: #6762a6;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background:
+      radial-gradient(1200px 620px at 82% -8%, rgba(176,107,255,.14), transparent 60%),
+      radial-gradient(900px 520px at 6% 108%, rgba(47,214,189,.08), transparent 55%),
+      var(--void);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    padding: clamp(20px, 4vw, 52px) clamp(16px, 4vw, 44px) 64px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+
+  /* ---- header ---- */
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: .28em;
+    text-transform: uppercase;
+    color: var(--violet);
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 18px;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--violet);
+    box-shadow: 0 0 12px 2px var(--violet);
+  }
+  h1 {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: clamp(30px, 5.6vw, 52px);
+    letter-spacing: -.01em;
+    line-height: 1.04;
+    margin: 0 0 16px;
+    text-wrap: balance;
+  }
+  h1 .a { color: var(--amber); }
+  h1 .b { color: var(--teal); }
+  .lede {
+    max-width: 66ch;
+    color: var(--ink-2);
+    font-size: clamp(15px, 1.7vw, 17.5px);
+    margin: 0;
+  }
+  .lede code {
+    font-family: var(--mono);
+    font-size: .88em;
+    color: var(--violet-bright);
+    background: var(--panel-2);
+    padding: 1px 6px;
+    border-radius: 5px;
+  }
+
+  /* ---- controls ---- */
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    margin: 34px 0 12px;
+    align-items: stretch;
+  }
+  .btn {
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: .01em;
+    border: 1px solid var(--line);
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    color: var(--ink);
+    padding: 14px 20px;
+    border-radius: 12px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    text-align: left;
+    min-width: 210px;
+    transition: transform .12s ease, border-color .2s ease, box-shadow .2s ease, opacity .2s ease;
+  }
+  .btn .k { display: flex; align-items: center; gap: 9px; }
+  .btn .num {
+    width: 20px; height: 20px; flex: none;
+    display: grid; place-items: center;
+    border-radius: 6px; font-size: 12px;
+    background: var(--panel); border: 1px solid var(--line);
+  }
+  .btn small { font-family: var(--sans); font-weight: 400; font-size: 12px; color: var(--ink-dim); padding-left: 29px; }
+  .btn:hover { transform: translateY(-2px); }
+  .btn:focus-visible { outline: 2px solid var(--violet); outline-offset: 3px; }
+  .btn.author { border-color: color-mix(in srgb, var(--amber) 42%, var(--line)); }
+  .btn.author .num { color: var(--amber); border-color: var(--amber-dim); }
+  .btn.author:hover { box-shadow: 0 10px 30px -12px rgba(242,160,61,.5); }
+  .btn.run { border-color: color-mix(in srgb, var(--teal) 42%, var(--line)); }
+  .btn.run .num { color: var(--teal); border-color: var(--teal-dim); }
+  .btn.run:hover { box-shadow: 0 10px 30px -12px rgba(47,214,189,.5); }
+  .btn[disabled] { opacity: .4; cursor: not-allowed; transform: none; box-shadow: none; }
+  .btn[disabled]:hover { transform: none; }
+  .hint {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-dim);
+    align-self: center;
+    transition: color .3s ease;
+  }
+  .hint.live { color: var(--teal); }
+
+  /* ---- stage ---- */
+  .stagewrap { overflow-x: auto; margin-top: 8px; padding: 4px 0 2px; }
+  .stage {
+    position: relative;
+    min-width: 660px;
+    display: flex;
+    flex-direction: column;
+    gap: 30px;
+    padding: 24px 6px;
+  }
+  canvas.wires {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    z-index: 0;
+  }
+  .lane {
+    position: relative;
+    z-index: 1;
+    border: 1px solid var(--line-soft);
+    border-radius: 16px;
+    padding: 16px 16px 18px;
+    background: linear-gradient(180deg, rgba(255,255,255,.014), transparent);
+  }
+  .lane.authoring { --hue: var(--amber); }
+  .lane.hot { --hue: var(--teal); }
+  .lane.dim { opacity: .5; }
+  .lanehead {
+    display: flex; align-items: baseline; gap: 12px;
+    font-family: var(--mono); font-size: 12.5px;
+    letter-spacing: .16em; text-transform: uppercase;
+    margin: 0 4px 16px;
+    color: var(--hue);
+  }
+  .lanehead .tag {
+    color: var(--ink-dim);
+    letter-spacing: .04em;
+    text-transform: none;
+    font-size: 12px;
+  }
+  .lanehead .badge {
+    margin-left: auto;
+    letter-spacing: .04em;
+    text-transform: none;
+    font-size: 11.5px;
+    color: var(--ink-2);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 2px 10px;
+  }
+  .row { display: flex; align-items: stretch; gap: 0; }
+  .node {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 12px 12px 13px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    transition: border-color .25s ease, box-shadow .25s ease, transform .25s ease, background .25s ease;
+  }
+  .node + .node { margin-left: 30px; }
+  .node .top { display: flex; align-items: center; gap: 8px; }
+  .node .ico { font-size: 17px; line-height: 1; filter: saturate(1.1); }
+  .node .name { font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--ink); }
+  .node .sub { font-size: 11.5px; color: var(--ink-dim); line-height: 1.35; }
+  .node .who {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--ink-2);
+    margin-top: 2px;
+  }
+  .node.hot-active {
+    border-color: var(--hue);
+    box-shadow: 0 0 0 1px var(--hue), 0 12px 34px -16px var(--hue);
+    transform: translateY(-2px);
+  }
+  .node.model {
+    border-color: color-mix(in srgb, var(--heroku) 40%, var(--line));
+    background: linear-gradient(180deg, #201646, #171034);
+  }
+  .node.model .name { color: var(--heroku); }
+  .node.model.hot-active { border-color: var(--heroku); box-shadow: 0 0 0 1px var(--heroku), 0 12px 34px -14px var(--heroku); }
+  .node.stored { border-color: color-mix(in srgb, var(--amber) 50%, var(--line)); }
+  .node .chip {
+    align-self: flex-start;
+    font-family: var(--mono); font-size: 10px;
+    color: var(--amber);
+    border: 1px solid var(--amber-dim);
+    border-radius: 6px; padding: 1px 6px;
+    opacity: 0; transform: translateY(-2px);
+    transition: opacity .3s ease, transform .3s ease;
+  }
+  .node.stored .chip { opacity: 1; transform: none; }
+
+  /* ---- ledger ---- */
+  .grid { display: grid; grid-template-columns: 1.1fr .9fr; gap: 18px; margin-top: 30px; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: linear-gradient(180deg, var(--panel), var(--void-2));
+    padding: 20px 22px 22px;
+  }
+  .card h2 {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .18em; text-transform: uppercase;
+    color: var(--ink-2); margin: 0 0 18px; font-weight: 600;
+  }
+  .meter { display: flex; flex-direction: column; gap: 16px; }
+  .stat { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .stat .lab { font-size: 13px; color: var(--ink-2); }
+  .stat .val {
+    font-family: var(--mono); font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    font-size: clamp(20px, 3vw, 26px);
+    letter-spacing: -.01em;
+  }
+  .stat .val.free { color: var(--teal); }
+  .stat .val.spend { color: var(--amber); }
+  .stat .val .u { font-size: 12px; color: var(--ink-dim); font-weight: 400; margin-left: 4px; }
+  .divider { height: 1px; background: var(--line-soft); margin: 2px 0; }
+  .counterfactual {
+    border: 1px dashed var(--amber-dim);
+    border-radius: 12px;
+    padding: 14px 16px;
+    background: rgba(242,160,61,.05);
+  }
+  .counterfactual .cf-lab { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; color: var(--amber); text-transform: uppercase; }
+  .counterfactual .cf-val { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 22px; color: var(--ink); margin-top: 6px; }
+  .counterfactual .cf-note { font-size: 12px; color: var(--ink-dim); margin-top: 6px; }
+  .counterfactual .cf-val s { color: var(--ink-dim); text-decoration-color: var(--amber); }
+
+  /* receipts */
+  .receipts { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto; }
+  .receipt {
+    font-family: var(--mono); font-size: 12px;
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 10px; border-radius: 9px;
+    border: 1px solid var(--line-soft);
+    background: var(--void-2);
+    animation: slideIn .32s ease;
+  }
+  .receipt .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .receipt.exec .dot { background: var(--teal); box-shadow: 0 0 8px var(--teal); }
+  .receipt.auth .dot { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+  .receipt .t { color: var(--ink); }
+  .receipt .m { margin-left: auto; color: var(--ink-dim); }
+  .receipt.exec .m .z { color: var(--teal); }
+  .empty { font-size: 12.5px; color: var(--ink-dim); font-family: var(--mono); padding: 6px 2px; }
+  @keyframes slideIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+
+  /* ---- legend ---- */
+  .legend { display: flex; flex-wrap: wrap; gap: 10px 22px; margin: 26px 2px 0; }
+  .leg { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--ink-2); }
+  .leg .sw { width: 12px; height: 12px; border-radius: 4px; flex: none; }
+  .leg .sw.human { background: var(--violet); }
+  .leg .sw.model { background: var(--heroku); }
+  .leg .sw.store { background: var(--amber); }
+  .leg .sw.exec { background: var(--teal); }
+  .leg b { color: var(--ink); font-weight: 600; }
+
+  /* ---- heroku ode ---- */
+  .ode {
+    margin-top: 30px;
+    border: 1px solid color-mix(in srgb, var(--heroku) 34%, var(--line));
+    border-radius: 18px;
+    padding: 26px clamp(22px, 4vw, 34px);
+    background:
+      radial-gradient(600px 260px at 100% 0%, rgba(139,127,242,.16), transparent 62%),
+      linear-gradient(180deg, #170f31, #100a22);
+    position: relative;
+    overflow: hidden;
+  }
+  .ode::after {
+    content: "";
+    position: absolute; right: -40px; top: -40px;
+    width: 220px; height: 220px;
+    background: radial-gradient(closest-side, rgba(139,127,242,.22), transparent);
+    pointer-events: none;
+  }
+  .ode .kicker {
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: .2em; text-transform: uppercase;
+    color: var(--heroku); display: flex; align-items: center; gap: 9px; margin: 0 0 12px;
+  }
+  .ode h3 { font-family: var(--mono); font-weight: 600; font-size: clamp(19px, 2.6vw, 24px); margin: 0 0 10px; color: var(--ink); letter-spacing: -.01em; }
+  .ode p { margin: 0; max-width: 70ch; color: var(--ink-2); font-size: 14.5px; }
+  .ode p code { font-family: var(--mono); color: var(--heroku); font-size: .88em; }
+  .ode .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+  .ode .chips span {
+    font-family: var(--mono); font-size: 11.5px; color: var(--ink-2);
+    border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px;
+    background: rgba(0,0,0,.2);
+  }
+  .ode .chips b { color: var(--heroku); font-weight: 600; }
+
+  footer {
+    margin-top: 34px; padding-top: 18px;
+    border-top: 1px solid var(--line-soft);
+    font-family: var(--mono); font-size: 11.5px; color: var(--ink-dim);
+    display: flex; flex-wrap: wrap; gap: 6px 16px; justify-content: space-between;
+  }
+  footer .thesis { color: var(--ink-2); }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="eyebrow">liftty · the middle of the runtime-code spectrum</p>
+  <h1>Author <span class="a">once</span>.<br />Execute <span class="b">forever</span>.</h1>
+  <p class="lede">
+    An LLM call is the wrong tool for a decision that's already been made. So the coach agent writes the
+    policy as code <em>one time</em> — model in the loop — then the runtime executes it on every logged set
+    with <strong>zero inference</strong>. Press the two buttons and watch where the model goes.
+    Same primitive as Code Mode (<code>LOADER.load()</code> vs <code>LOADER.get()</code>) — different lifetime.
+  </p>
+
+  <div class="controls">
+    <button class="btn author" id="btnAuthor" type="button">
+      <span class="k"><span class="num">1</span> Author a policy</span>
+      <small>the lifter states a rule in chat · runs once</small>
+    </button>
+    <button class="btn run" id="btnRun" type="button" disabled>
+      <span class="k"><span class="num">2</span> Log a set</span>
+      <small>fires on the workout event · runs every time</small>
+    </button>
+    <span class="hint" id="hint">← author a policy first, then it fires on every set</span>
+  </div>
+
+  <div class="stagewrap">
+    <div class="stage" id="stage">
+      <canvas class="wires" id="wires"></canvas>
+
+      <div class="lane authoring" id="laneAuthor">
+        <p class="lanehead">Authoring path <span class="tag">model in the loop · ~2.3 s · ~1,850 tokens</span><span class="badge">runs once</span></p>
+        <div class="row">
+          <div class="node" data-lane="author">
+            <div class="top"><span class="ico">🏋️</span><span class="name">Lifter</span></div>
+            <div class="sub">"if I fail a set, cut my next top set 5%"</div>
+            <div class="who">human · input</div>
+          </div>
+          <div class="node" data-lane="author">
+            <div class="top"><span class="ico">🧠</span><span class="name">Coach Agent</span></div>
+            <div class="sub">turns the sentence into a code-writing task</div>
+            <div class="who">agent</div>
+          </div>
+          <div class="node model" data-lane="author">
+            <div class="top"><span class="ico">💜</span><span class="name">Heroku · opus-4-8</span></div>
+            <div class="sub">writes the policy as a JS module</div>
+            <div class="who">model · authors</div>
+          </div>
+          <div class="node" data-lane="author">
+            <div class="top"><span class="ico">✔️</span><span class="name">Dry-run</span></div>
+            <div class="sub">throwaway isolate validates shape before it's accepted</div>
+            <div class="who">Worker Loader</div>
+          </div>
+          <div class="node" data-lane="author" id="storeNode">
+            <div class="top"><span class="ico">🗄️</span><span class="name">DO · SQLite</span></div>
+            <div class="sub">source stored in the <code style="font-family:var(--mono);font-size:.86em;color:var(--amber)">plugins</code> table, versioned</div>
+            <div class="who">stores · source of truth</div>
+            <span class="chip">auto-regulate v1 · stored</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="lane hot dim" id="laneHot">
+        <p class="lanehead">Hot path <span class="tag">no model · ~4 ms · 0 tokens</span><span class="badge">runs every set</span></p>
+        <div class="row">
+          <div class="node" data-lane="hot">
+            <div class="top"><span class="ico">🏋️</span><span class="name">Lifter</span></div>
+            <div class="sub">taps "log set" mid-workout</div>
+            <div class="who">human · event</div>
+          </div>
+          <div class="node" data-lane="hot">
+            <div class="top"><span class="ico">📱</span><span class="name">/session</span></div>
+            <div class="sub">WebSocket frame, hibernation-safe</div>
+            <div class="who">edge</div>
+          </div>
+          <div class="node" data-lane="hot">
+            <div class="top"><span class="ico">⚙️</span><span class="name">DO event</span></div>
+            <div class="sub">logSet() validates, then dispatches</div>
+            <div class="who">agent runtime</div>
+          </div>
+          <div class="node" data-lane="hot">
+            <div class="top"><span class="ico">⚡</span><span class="name">Worker Loader</span></div>
+            <div class="sub">runs the stored code in a warm isolate · <code style="font-family:var(--mono);font-size:.86em;color:var(--teal)">globalOutbound: null</code></div>
+            <div class="who">executes</div>
+          </div>
+          <div class="node" data-lane="hot">
+            <div class="top"><span class="ico">📋</span><span class="name">New plan</span></div>
+            <div class="sub">deterministic actions → back to the phone</div>
+            <div class="who">human · result</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span class="leg"><span class="sw human"></span><b>Human</b> · states the rule, logs the sets</span>
+    <span class="leg"><span class="sw model"></span><b>Heroku model</b> · authors the code (once)</span>
+    <span class="leg"><span class="sw store"></span><b>DO SQLite</b> · stores the source</span>
+    <span class="leg"><span class="sw exec"></span><b>Worker Loader</b> · executes it (forever)</span>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>The ledger</h2>
+      <div class="meter">
+        <div class="stat">
+          <span class="lab">Policy authored</span>
+          <span class="val" id="vAuthored">—</span>
+        </div>
+        <div class="stat">
+          <span class="lab">Authoring cost <span style="color:var(--amber)">(one time)</span></span>
+          <span class="val spend" id="vAuthCost">0<span class="u">tokens</span></span>
+        </div>
+        <div class="divider"></div>
+        <div class="stat">
+          <span class="lab">Sets executed since</span>
+          <span class="val" id="vSets">0</span>
+        </div>
+        <div class="stat">
+          <span class="lab">Tokens spent executing</span>
+          <span class="val free" id="vTokens">0<span class="u">forever</span></span>
+        </div>
+        <div class="stat">
+          <span class="lab">Typical latency</span>
+          <span class="val free" id="vLat">~4<span class="u">ms</span></span>
+        </div>
+        <div class="counterfactual">
+          <div class="cf-lab">If you re-ran the model every set instead</div>
+          <div class="cf-val" id="vCf">$0.00 · 0 tokens</div>
+          <div class="cf-note">Illustrative at ~$15 / 1M tokens. Plugins move the model off the hot path — the number above stays $0.00.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Receipts <span style="color:var(--ink-dim);font-weight:400">· wrangler tail</span></h2>
+      <div class="receipts" id="receipts">
+        <div class="empty">// no events yet — author a policy, then log some sets</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="ode">
+    <p class="kicker">💜 an ode to heroku</p>
+    <h3>The brain is bring-your-own.</h3>
+    <p>
+      <code>claude-opus-4-8</code> runs on <b style="color:var(--heroku)">Heroku Managed Inference</b> — it does the one
+      genuinely hard, creative thing here: read a sentence a human typed and write correct code for it. That happens
+      <em>once</em>. Cloudflare stores what Heroku wrote and executes it on the edge on every event after, for
+      milliseconds and no tokens. Author on Heroku; execute on the edge. Existing billing untouched, the model swappable
+      behind AI Gateway — the compute just moves to where a made decision belongs.
+    </p>
+    <div class="chips">
+      <span>model: <b>claude-opus-4-8</b></span>
+      <span>via <b>AI Gateway</b> → Heroku</span>
+      <span>authors: <b>once</b></span>
+      <span>executes: <b>∞</b></span>
+    </div>
+  </div>
+
+  <footer>
+    <span class="thesis">Code Mode makes the model's decisions cheaper — plugins make already-made decisions free.</span>
+    <span>liftty · Workers + Durable Objects + Worker Loader</span>
+  </footer>
+</div>
+
+<script>
+(() => {
+  "use strict";
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  const TOKENS_PER_AUTHOR = 1850;
+  const USD_PER_TOKEN = 15 / 1e6; // illustrative opus-tier rate
+  const state = { authored: false, sets: 0 };
+
+  const $ = (id) => document.getElementById(id);
+  const stage = $("stage"), canvas = $("wires"), ctx = canvas.getContext("2d");
+  const laneHot = $("laneHot"), storeNode = $("storeNode");
+  const btnAuthor = $("btnAuthor"), btnRun = $("btnRun"), hint = $("hint");
+
+  // ---- geometry ----
+  let dpr = Math.min(window.devicePixelRatio || 1, 2);
+  function centersFor(sel) {
+    const box = stage.getBoundingClientRect();
+    return [...document.querySelectorAll(sel)].map((n) => {
+      const r = n.getBoundingClientRect();
+      return { x: r.left - box.left + r.width / 2, y: r.top - box.top + r.height / 2, h: r.height };
+    });
+  }
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = stage.clientWidth, h = stage.clientHeight;
+    canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawWires();
+  }
+  function laneSegments(sel, color, active) {
+    const c = centersFor(sel);
+    for (let i = 0; i < c.length - 1; i++) {
+      const a = c[i], b = c[i + 1];
+      const y = a.y;
+      ctx.beginPath();
+      ctx.moveTo(a.x + a.h * 0.02 + 40, y);
+      ctx.lineTo(b.x - 40, y);
+      ctx.strokeStyle = active ? color : "rgba(120,104,168,.28)";
+      ctx.lineWidth = active ? 2 : 1.25;
+      if (active) { ctx.shadowColor = color; ctx.shadowBlur = 10; } else { ctx.shadowBlur = 0; }
+      ctx.stroke();
+      // arrowhead
+      ctx.beginPath();
+      ctx.moveTo(b.x - 40, y);
+      ctx.lineTo(b.x - 46, y - 4);
+      ctx.lineTo(b.x - 46, y + 4);
+      ctx.closePath();
+      ctx.fillStyle = active ? color : "rgba(120,104,168,.34)";
+      ctx.fill();
+    }
+    ctx.shadowBlur = 0;
+    return c;
+  }
+  function drawWires(activeLane) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    laneSegments('#laneAuthor .node', "rgba(242,160,61,.9)", activeLane === "author");
+    laneSegments('#laneHot .node', "rgba(47,214,189,.95)", activeLane === "hot");
+  }
+
+  // ---- packet animation ----
+  function pathPoints(centers) {
+    // travel node-center to node-center
+    return centers.map((c) => ({ x: c.x, y: c.y }));
+  }
+  function animatePacket(sel, color, onArriveNode) {
+    return new Promise((resolve) => {
+      const centers = centersFor(sel);
+      const pts = pathPoints(centers);
+      const activeLane = sel.includes("Author") ? "author" : "hot";
+      if (reduce) {
+        centers.forEach((_, i) => onArriveNode && onArriveNode(i));
+        drawWires(); resolve(); return;
+      }
+      const segMs = 320;
+      const total = segMs * (pts.length - 1);
+      let start = null;
+      function frame(ts) {
+        if (start === null) start = ts;
+        const t = Math.min((ts - start) / total, 1);
+        const fseg = t * (pts.length - 1);
+        const seg = Math.min(Math.floor(fseg), pts.length - 2);
+        const local = fseg - seg;
+        const e = local < 0.5 ? 2 * local * local : 1 - Math.pow(-2 * local + 2, 2) / 2;
+        const a = pts[seg], b = pts[seg + 1];
+        const x = a.x + (b.x - a.x) * e, y = a.y + (b.y - a.y) * e;
+
+        drawWires(activeLane);
+        // trail
+        for (let k = 6; k >= 1; k--) {
+          const tt = Math.max(0, e - k * 0.05);
+          const tx = a.x + (b.x - a.x) * tt, ty = a.y + (b.y - a.y) * tt;
+          ctx.beginPath();
+          ctx.arc(tx, ty, 3.2, 0, Math.PI * 2);
+          ctx.fillStyle = color.replace(/[\d.]+\)$/, (0.06 * (7 - k)) + ")");
+          ctx.fill();
+        }
+        const g = ctx.createRadialGradient(x, y, 0, x, y, 13);
+        g.addColorStop(0, color.replace(/[\d.]+\)$/, "1)"));
+        g.addColorStop(0.35, color);
+        g.addColorStop(1, color.replace(/[\d.]+\)$/, "0)"));
+        ctx.beginPath(); ctx.arc(x, y, 13, 0, Math.PI * 2); ctx.fillStyle = g; ctx.fill();
+        ctx.beginPath(); ctx.arc(x, y, 3.4, 0, Math.PI * 2); ctx.fillStyle = "#fff"; ctx.fill();
+
+        // fire node arrival
+        const arrived = Math.round(fseg);
+        if (arrived !== frame._last && arrived < centers.length) {
+          frame._last = arrived;
+          onArriveNode && onArriveNode(arrived);
+        }
+        if (t < 1) requestAnimationFrame(frame);
+        else { drawWires(); resolve(); }
+      }
+      frame._last = -1;
+      requestAnimationFrame(frame);
+    });
+  }
+
+  function pulse(node, isModel) {
+    node.classList.add("hot-active");
+    setTimeout(() => node.classList.remove("hot-active"), 520);
+  }
+
+  // ---- receipts + ledger ----
+  const receiptsEl = $("receipts");
+  function addReceipt(kind, text, meta) {
+    const empty = receiptsEl.querySelector(".empty");
+    if (empty) empty.remove();
+    const el = document.createElement("div");
+    el.className = "receipt " + kind;
+    el.innerHTML = '<span class="dot"></span><span class="t">' + text + '</span><span class="m">' + meta + '</span>';
+    receiptsEl.prepend(el);
+    while (receiptsEl.children.length > 24) receiptsEl.lastChild.remove();
+  }
+  function fmt(n) { return n.toLocaleString("en-US"); }
+  function render() {
+    $("vAuthored").textContent = state.authored ? "auto-regulate v1" : "—";
+    $("vAuthored").style.color = state.authored ? "var(--heroku)" : "var(--ink-dim)";
+    $("vAuthCost").innerHTML = (state.authored ? fmt(TOKENS_PER_AUTHOR) : "0") + '<span class="u">tokens</span>';
+    $("vSets").textContent = fmt(state.sets);
+    $("vTokens").innerHTML = '0<span class="u">forever</span>';
+    const cfTokens = state.sets * TOKENS_PER_AUTHOR;
+    const cfUsd = cfTokens * USD_PER_TOKEN;
+    $("vCf").innerHTML = '$' + cfUsd.toFixed(2) + ' · ' + fmt(cfTokens) + ' tokens';
+  }
+
+  // ---- interactions ----
+  let busy = false;
+  async function doAuthor() {
+    if (busy) return; busy = true;
+    btnAuthor.disabled = true; btnRun.disabled = true;
+    const nodes = document.querySelectorAll('#laneAuthor .node');
+    await animatePacket("#laneAuthor .node", "rgba(242,160,61,.85)", (i) => {
+      if (nodes[i]) pulse(nodes[i]);
+    });
+    state.authored = true;
+    storeNode.classList.add("stored");
+    laneHot.classList.remove("dim");
+    addReceipt("auth", "policy compiled · <b style='color:var(--amber)'>auto-regulate v1</b>", "~2.3s · " + fmt(TOKENS_PER_AUTHOR) + " tok");
+    render();
+    hint.textContent = "now log sets — the model never runs again";
+    hint.classList.add("live");
+    btnAuthor.disabled = false; btnRun.disabled = false;
+    busy = false;
+  }
+  async function doRun() {
+    if (busy || !state.authored) return; busy = true;
+    btnAuthor.disabled = true; btnRun.disabled = true;
+    const nodes = document.querySelectorAll('#laneHot .node');
+    const ms = (3.4 + Math.random() * 2.6).toFixed(1);
+    await animatePacket("#laneHot .node", "rgba(47,214,189,.9)", (i) => {
+      if (nodes[i]) pulse(nodes[i]);
+    });
+    state.sets += 1;
+    $("vLat").innerHTML = "~" + ms + '<span class="u">ms</span>';
+    addReceipt("exec", "auto-regulate fired · set #" + state.sets, ms + "ms · <span class='z'>0 tokens</span>");
+    render();
+    btnAuthor.disabled = false; btnRun.disabled = false;
+    busy = false;
+  }
+
+  btnAuthor.addEventListener("click", doAuthor);
+  btnRun.addEventListener("click", doRun);
+
+  // init
+  const ro = new ResizeObserver(resize);
+  ro.observe(stage);
+  window.addEventListener("resize", resize);
+  // fonts/layout settle
+  requestAnimationFrame(() => { resize(); render(); });
+  setTimeout(resize, 250);
+})();
+</script>
+</body>
+</html>
