@@ -51,6 +51,23 @@ export interface Training {
 	adjustProgram(change: ProgramChange): AdjustResult;
 }
 
+/** M5: plugin authoring surface. Kept separate from Training so the four-method centerpiece stays clean. */
+export type PluginSummary = {
+	id: string;
+	name: string;
+	version: number;
+	enabled: boolean;
+	created_at: string;
+	last_run: string | null;
+	last_result: string | null;
+};
+
+export interface PluginAuthoring {
+	createPlugin(input: { name: string; source: string }): Promise<{ id: string; name: string; version: number }>;
+	listPlugins(): PluginSummary[];
+	setPluginEnabled(input: { id: string; enabled: boolean }): { id: string; enabled: boolean };
+}
+
 type AdjustInput = {
 	op: "deload" | "setExerciseWeight" | "advanceWeek" | "setPhase";
 	pct?: number;
@@ -69,7 +86,7 @@ type AdjustInput = {
  * lines in Code Mode — the whole point is to inflate the tool surface without changing behavior.
  * Default 0 → byte-identical to before.
  */
-export function buildTrainingTools(t: Training, opts?: { decoys?: number }) {
+export function buildTrainingTools(t: Training & PluginAuthoring, opts?: { decoys?: number }) {
 	const real = {
 		getProgram: tool({
 			description:
@@ -140,6 +157,38 @@ export function buildTrainingTools(t: Training, opts?: { decoys?: number }) {
 						throw new Error(`unknown op: ${(c as { op: string }).op}`);
 				}
 			},
+		}),
+		// --- M5: plugin authoring. These flow into Code Mode automatically (buildCodeModeTool wraps
+		// this same object), so the coach can compile a stated policy into persistent code from a
+		// snippet — the spectrum's left end (ephemeral Code Mode) authoring the middle (a stored plugin).
+		createPlugin: tool({
+			description:
+				"Compile a stated training policy into a PERSISTENT plugin that fires deterministically on every logged set with zero tokens (no LLM on the execution path). `source` is an ES module: `export default { onSetLogged(event) { return { actions, note } } }`. `event` = { set:{exercise,reps,weight}, failed, prescribed, program, recentHistory, activeSession }. Return `actions`: an array of ProgramChange — ONLY { op:'deload', pct? } or { op:'setExerciseWeight', exercise, weight } (max 3 per event). The plugin must NOT mutate anything or call the network — it returns proposed changes and the app applies them through the validated path. The source is dry-run-validated before it is saved; a bad module is rejected. Use this when the lifter states a rule they want enforced every session (e.g. 'if I fail my top set, cut it 5% next time').",
+			inputSchema: jsonSchema<{ name: string; source: string }>({
+				type: "object",
+				properties: {
+					name: { type: "string", description: "Short policy name, e.g. 'auto-regulate'" },
+					source: { type: "string", description: "ES module source: export default { onSetLogged(event){ return { actions } } }" },
+				},
+				required: ["name", "source"],
+				additionalProperties: false,
+			}),
+			execute: async ({ name, source }) => t.createPlugin({ name, source }),
+		}),
+		listPlugins: tool({
+			description: "List the lifter's saved plugins (id, name, version, enabled, last run/result). Use to see what policies are currently enforced on every logged set.",
+			inputSchema: jsonSchema<Record<string, never>>({ type: "object", properties: {}, additionalProperties: false }),
+			execute: async () => t.listPlugins(),
+		}),
+		setPluginEnabled: tool({
+			description: "Enable or disable a saved plugin by id (a disabled plugin does not fire on logged sets).",
+			inputSchema: jsonSchema<{ id: string; enabled: boolean }>({
+				type: "object",
+				properties: { id: { type: "string" }, enabled: { type: "boolean" } },
+				required: ["id", "enabled"],
+				additionalProperties: false,
+			}),
+			execute: async ({ id, enabled }) => t.setPluginEnabled({ id, enabled }),
 		}),
 	};
 
