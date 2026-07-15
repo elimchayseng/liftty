@@ -1,0 +1,15 @@
+# M6 container contrast — Python .fit parser dependencies.
+#
+# garmin-fit-sdk: the OFFICIAL Garmin Python FIT SDK (chosen over `fitparse`, see below).
+# It ships the CURRENT FIT Global Profile, so it decodes the strength-training message
+# types — the `set` message (global num 225: repetitions / weight / exercise_category /
+# exercise_name / set_type) and `workout` / `exercise_title` — that a COROS strength
+# session actually emits. `fitparse` is popular and robust for arbitrary message dumps,
+# but its bundled profile is old (last release 2018) and does not know the modern `set`
+# message, so strength reps/weight come through as raw unknown fields. We want the decoded
+# semantics, so we use the official SDK for the parser. `dump_messages.py` uses this same
+# SDK so Ethan's field-name dump matches exactly what the parser sees.
+#
+# No web framework: the container HTTP server uses Python's stdlib http.server (below),
+# so this is the only third-party dependency. Pin loosely; lock from the fixture step.
+garmin-fit-sdk>=21.141
