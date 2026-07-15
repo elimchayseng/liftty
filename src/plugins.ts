@@ -97,6 +97,10 @@ const MAX_ACTIONS_PER_EVENT = 3;
 const ALLOWED_OPS = new Set<ProgramChange["op"]>(["deload", "setExerciseWeight"]);
 const COMPAT_DATE = "2026-03-10"; // Dynamic Workers open-beta baseline
 const LIMITS: { cpuMs: number; subRequests: number } = { cpuMs: 50, subRequests: 0 };
+// Wall-clock guard on the plugin RPC. `cpuMs` only caps CPU — a plugin that returns a never-resolving
+// promise (`onSetLogged() { return new Promise(() => {}) }`) burns ZERO cpu, so cpuMs never trips and
+// the awaited RPC would hang firePlugins → onMessage forever. Race the RPC against this instead.
+const PLUGIN_RPC_TIMEOUT_MS = 2000;
 
 /**
  * The trusted wrapper module. Plain-object exports aren't RPC-callable, but a WorkerEntrypoint class
@@ -166,6 +170,37 @@ function workerCode(source: string): WorkerLoaderWorkerCode {
 	};
 }
 
+/** Race a plugin's `onSetLogged` RPC against a wall-clock timeout (cpuMs can't catch an idle hang). */
+async function callWithTimeout(ep: PluginEntrypoint, event: PluginEvent): Promise<PluginResult> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => reject(new Error(`plugin timed out after ${PLUGIN_RPC_TIMEOUT_MS}ms`)), PLUGIN_RPC_TIMEOUT_MS);
+	});
+	try {
+		return await Promise.race([ep.onSetLogged(event), timeout]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
+/**
+ * A fresh one-shot isolate for the author-time dry-run. Prefers the real `LOADER.load(code)` — a true
+ * uncached one-shot, the primitive the memo/PRODUCT-VISION reference — when the runtime implements it
+ * (prod workerd). Local miniflare only implements `get`, so we fall back to `get(uniqueId, cb)`, a
+ * guaranteed cache miss that is an equivalent one-shot. Feature-detected so `npx vitest run` stays
+ * green locally AND prod exercises `load()`. The JSON log line lets `wrangler tail` confirm which ran.
+ */
+function dryRunStub(loader: WorkerLoader, name: string, source: string): { getEntrypoint(): unknown } {
+	const withLoad = loader as WorkerLoader & { load?: (code: WorkerLoaderWorkerCode) => { getEntrypoint(): unknown } };
+	if (typeof withLoad.load === "function") {
+		console.log(JSON.stringify({ dryRun: "load()", plugin: slugify(name) }));
+		return withLoad.load(workerCode(source));
+	}
+	console.log(JSON.stringify({ dryRun: "get(uniqueId)", plugin: slugify(name) }));
+	const id = `dryrun:${slugify(name)}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+	return loader.get(id, () => workerCode(source));
+}
+
 /**
  * PUBLIC #1 — author-time. Prototypes `MODULES.put(name, source, {contract, validate, capabilities})`.
  *
@@ -180,18 +215,15 @@ export async function createPlugin(host: PluginHost, input: { name: string; sour
 	if (!name) throw new Error("createPlugin: name is required");
 	if (!source.trim()) throw new Error("createPlugin: source is required");
 
-	// Author-time dry-run: a throwaway isolate to compile + shape-check before we store. The ideal
-	// primitive is one-shot `LOADER.load(code)`, but the local miniflare WorkerLoader only implements
-	// `get`; a UNIQUE-per-attempt id makes `get(id, cb)` a fresh (cache-miss) isolate every time — an
-	// equivalent one-shot that works in both the test runtime and prod. (A null-name get is also
-	// uncached but surfaces a compile failure as a stray unhandled rejection under vitest; a unique
-	// named id does not.)
-	const dryRunId = `dryrun:${slugify(name)}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+	// Author-time dry-run: a throwaway one-shot isolate to compile + shape-check before we store.
+	// `dryRunStub` prefers real `LOADER.load(code)` in prod and falls back to a unique-id `get()` in
+	// local miniflare (see its doc). Timeout-guarded so a hanging module is rejected at authoring, not
+	// stored to hang the hot path later.
 	let result: PluginResult;
 	try {
-		const stub = host.loader.get(dryRunId, () => workerCode(source));
+		const stub = dryRunStub(host.loader, name, source);
 		const ep = stub.getEntrypoint() as unknown as PluginEntrypoint;
-		result = await ep.onSetLogged(SYNTHETIC_EVENT);
+		result = await callWithTimeout(ep, SYNTHETIC_EVENT);
 	} catch (err) {
 		throw new Error(`createPlugin: dry-run failed — ${err instanceof Error ? err.message : String(err)}`);
 	}
@@ -237,7 +269,7 @@ export async function runPlugins(host: PluginHost, event: PluginEvent): Promise<
 			});
 			const ep = stub.getEntrypoint() as unknown as PluginEntrypoint;
 			const t0 = Date.now();
-			const result = await ep.onSetLogged(event); // awaited RPC = I/O, so Date.now() advances across it
+			const result = await callWithTimeout(ep, event); // timeout-guarded; awaited RPC = I/O so Date.now() advances
 			ms = Date.now() - t0;
 
 			const actions = sanitizeActions(result?.actions);
