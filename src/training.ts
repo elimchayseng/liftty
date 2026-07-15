@@ -60,9 +60,17 @@ type AdjustInput = {
 	goal?: string;
 };
 
-/** Wrap the four typed methods as AI SDK tools for the chat loop (M2, non-Code-Mode path). */
-export function buildTrainingTools(t: Training) {
-	return {
+/**
+ * Wrap the four typed methods as AI SDK tools for the chat loop (M2, non-Code-Mode path).
+ *
+ * `opts.decoys` (token-measurement study): append the first N of a deterministic list of 20
+ * realistic no-op tools (see `DECOY_TOOLS`). They are real `tool({...})` entries, so they add JSON
+ * Schema to every tools-mode request AND (via createCodeTool in codemode.ts) generate type-block
+ * lines in Code Mode — the whole point is to inflate the tool surface without changing behavior.
+ * Default 0 → byte-identical to before.
+ */
+export function buildTrainingTools(t: Training, opts?: { decoys?: number }) {
+	const real = {
 		getProgram: tool({
 			description:
 				"Get the lifter's current program: phase, week, prescribed days/lifts, main lifts with goals, injuries, and status. Call before answering questions about what's prescribed or before adjusting.",
@@ -80,7 +88,7 @@ export function buildTrainingTools(t: Training) {
 				type: "object",
 				properties: {
 					exercise: { type: "string", description: "Filter to sessions mentioning this lift" },
-					limit: { type: "integer", minimum: 1, maximum: 50 },
+					limit: { type: "integer", minimum: 1, maximum: 200 },
 				},
 				additionalProperties: false,
 			}),
@@ -134,4 +142,359 @@ export function buildTrainingTools(t: Training) {
 			},
 		}),
 	};
+
+	const n = Math.max(0, opts?.decoys ?? 0);
+	if (n === 0) return real;
+	// Merge the real four with the first N decoys into ONE flat tools object. Object key order is
+	// insertion order, so real tools stay first and decoys follow deterministically.
+	return { ...real, ...Object.fromEntries(DECOY_TOOLS.slice(0, n)) };
 }
+
+/**
+ * 20 realistic-looking no-op tools for the token-measurement study, in a FIXED order. Each is a real
+ * AI SDK `tool({...})` with a plausible name/description and a small hand-written `jsonSchema()`
+ * (2–4 realistic props) so it contributes representative bytes to the request. None do anything —
+ * every `execute` returns `{ ok: false, reason: "not available in this build" }`. The order below is
+ * the contract: `buildTrainingTools(t, { decoys: N })` appends the first N of these.
+ */
+const noop = async () => ({ ok: false, reason: "not available in this build" }) as const;
+
+const DECOY_TOOLS: [string, ReturnType<typeof tool<any, any>>][] = [
+	[
+		"logNutrition",
+		tool({
+			description: "Log a meal's macros and calories for the day.",
+			inputSchema: jsonSchema<{ meal: string; calories?: number; proteinG?: number; carbsG?: number }>({
+				type: "object",
+				properties: {
+					meal: { type: "string", description: "Meal name, e.g. 'breakfast'" },
+					calories: { type: "integer", minimum: 0 },
+					proteinG: { type: "number", minimum: 0 },
+					carbsG: { type: "number", minimum: 0 },
+				},
+				required: ["meal"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+	[
+		"logSleep",
+		tool({
+			description: "Record last night's sleep duration and quality.",
+			inputSchema: jsonSchema<{ date: string; hours: number; quality?: number }>({
+				type: "object",
+				properties: {
+					date: { type: "string", description: "ISO date" },
+					hours: { type: "number", minimum: 0, maximum: 24 },
+					quality: { type: "integer", minimum: 1, maximum: 5 },
+				},
+				required: ["date", "hours"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+	[
+		"logCardioSession",
+		tool({
+			description: "Log a cardio session's type, duration, and distance.",
+			inputSchema: jsonSchema<{ type: string; minutes: number; distanceKm?: number; avgHr?: number }>({
+				type: "object",
+				properties: {
+					type: { type: "string", description: "e.g. 'run', 'row', 'bike'" },
+					minutes: { type: "integer", minimum: 1 },
+					distanceKm: { type: "number", minimum: 0 },
+					avgHr: { type: "integer", minimum: 0 },
+				},
+				required: ["type", "minutes"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+	[
+		"trackBodyweight",
+		tool({
+			description: "Record a bodyweight measurement for trend tracking.",
+			inputSchema: jsonSchema<{ date: string; weightLb: number }>({
+				type: "object",
+				properties: {
+					date: { type: "string", description: "ISO date" },
+					weightLb: { type: "number", minimum: 0 },
+				},
+				required: ["date", "weightLb"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+	[
+		"plateMath",
+		tool({
+			description: "Compute the plates per side needed for a target barbell load.",
+			inputSchema: jsonSchema<{ targetWeight: number; barWeight?: number; unit?: string }>({
+				type: "object",
+				properties: {
+					targetWeight: { type: "number", minimum: 0 },
+					barWeight: { type: "number", minimum: 0, description: "default 45" },
+					unit: { type: "string", enum: ["lb", "kg"] },
+				},
+				required: ["targetWeight"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+	[
+		"estimate1RM",
+		tool({
+			description: "Estimate a one-rep max from a weight and rep count.",
+			inputSchema: jsonSchema<{ weight: number; reps: number; formula?: string }>({
+				type: "object",
+				properties: {
+					weight: { type: "number", minimum: 0 },
+					reps: { type: "integer", minimum: 1 },
+					formula: { type: "string", enum: ["epley", "brzycki", "lombardi"] },
+				},
+				required: ["weight", "reps"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+	[
+		"logMobility",
+		tool({
+			description: "Log a mobility or stretching routine and its focus area.",
+			inputSchema: jsonSchema<{ area: string; minutes: number; notes?: string }>({
+				type: "object",
+				properties: {
+					area: { type: "string", description: "e.g. 'ankles', 'hips'" },
+					minutes: { type: "integer", minimum: 1 },
+					notes: { type: "string" },
+				},
+				required: ["area", "minutes"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+	[
+		"logSteps",
+		tool({
+			description: "Record a daily step count.",
+			inputSchema: jsonSchema<{ date: string; steps: number }>({
+				type: "object",
+				properties: {
+					date: { type: "string", description: "ISO date" },
+					steps: { type: "integer", minimum: 0 },
+				},
+				required: ["date", "steps"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+	[
+		"setReminder",
+		tool({
+			description: "Schedule a reminder for a training or recovery task.",
+			inputSchema: jsonSchema<{ message: string; when: string; repeat?: string }>({
+				type: "object",
+				properties: {
+					message: { type: "string" },
+					when: { type: "string", description: "ISO datetime" },
+					repeat: { type: "string", enum: ["none", "daily", "weekly"] },
+				},
+				required: ["message", "when"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+	[
+		"logHydration",
+		tool({
+			description: "Log fluid intake in ounces for the day.",
+			inputSchema: jsonSchema<{ date: string; ounces: number }>({
+				type: "object",
+				properties: {
+					date: { type: "string", description: "ISO date" },
+					ounces: { type: "number", minimum: 0 },
+				},
+				required: ["date", "ounces"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+	[
+		"logSoreness",
+		tool({
+			description: "Record perceived muscle soreness by body region.",
+			inputSchema: jsonSchema<{ region: string; level: number; date?: string }>({
+				type: "object",
+				properties: {
+					region: { type: "string", description: "e.g. 'quads', 'lower back'" },
+					level: { type: "integer", minimum: 1, maximum: 5 },
+					date: { type: "string" },
+				},
+				required: ["region", "level"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+	[
+		"logRPE",
+		tool({
+			description: "Record rate of perceived exertion for a set or session.",
+			inputSchema: jsonSchema<{ exercise: string; rpe: number; set?: number }>({
+				type: "object",
+				properties: {
+					exercise: { type: "string" },
+					rpe: { type: "number", minimum: 1, maximum: 10 },
+					set: { type: "integer", minimum: 1 },
+				},
+				required: ["exercise", "rpe"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+	[
+		"exportProgram",
+		tool({
+			description: "Export the current program to a portable format.",
+			inputSchema: jsonSchema<{ format: string; includeHistory?: boolean }>({
+				type: "object",
+				properties: {
+					format: { type: "string", enum: ["json", "csv", "pdf"] },
+					includeHistory: { type: "boolean" },
+				},
+				required: ["format"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+	[
+		"importProgram",
+		tool({
+			description: "Import a program from an external source.",
+			inputSchema: jsonSchema<{ source: string; format?: string; overwrite?: boolean }>({
+				type: "object",
+				properties: {
+					source: { type: "string", description: "URL or file id" },
+					format: { type: "string", enum: ["json", "csv"] },
+					overwrite: { type: "boolean" },
+				},
+				required: ["source"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+	[
+		"compareBlocks",
+		tool({
+			description: "Compare two training blocks by a key metric.",
+			inputSchema: jsonSchema<{ blockA: string; blockB: string; metric?: string }>({
+				type: "object",
+				properties: {
+					blockA: { type: "string" },
+					blockB: { type: "string" },
+					metric: { type: "string", enum: ["volume", "tonnage", "topSet"] },
+				},
+				required: ["blockA", "blockB"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+	[
+		"logConditioning",
+		tool({
+			description: "Log a conditioning or metcon workout and its result.",
+			inputSchema: jsonSchema<{ workout: string; rounds?: number; timeSec?: number }>({
+				type: "object",
+				properties: {
+					workout: { type: "string" },
+					rounds: { type: "integer", minimum: 0 },
+					timeSec: { type: "integer", minimum: 0 },
+				},
+				required: ["workout"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+	[
+		"setBodyweightGoal",
+		tool({
+			description: "Set a target bodyweight and target date.",
+			inputSchema: jsonSchema<{ targetLb: number; byDate?: string }>({
+				type: "object",
+				properties: {
+					targetLb: { type: "number", minimum: 0 },
+					byDate: { type: "string", description: "ISO date" },
+				},
+				required: ["targetLb"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+	[
+		"logSupplement",
+		tool({
+			description: "Record a supplement taken and its dose.",
+			inputSchema: jsonSchema<{ name: string; doseMg?: number; date?: string }>({
+				type: "object",
+				properties: {
+					name: { type: "string" },
+					doseMg: { type: "number", minimum: 0 },
+					date: { type: "string" },
+				},
+				required: ["name"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+	[
+		"calcMacros",
+		tool({
+			description: "Calculate daily macro targets from bodyweight and goal.",
+			inputSchema: jsonSchema<{ bodyweightLb: number; goal?: string; proteinPerLb?: number }>({
+				type: "object",
+				properties: {
+					bodyweightLb: { type: "number", minimum: 0 },
+					goal: { type: "string", enum: ["cut", "maintain", "bulk"] },
+					proteinPerLb: { type: "number", minimum: 0 },
+				},
+				required: ["bodyweightLb"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+	[
+		"logWeighIn",
+		tool({
+			description: "Record a scale weigh-in with an optional body-fat estimate.",
+			inputSchema: jsonSchema<{ date: string; weightLb: number; bodyFatPct?: number }>({
+				type: "object",
+				properties: {
+					date: { type: "string", description: "ISO date" },
+					weightLb: { type: "number", minimum: 0 },
+					bodyFatPct: { type: "number", minimum: 0, maximum: 100 },
+				},
+				required: ["date", "weightLb"],
+				additionalProperties: false,
+			}),
+			execute: noop,
+		}),
+	],
+];

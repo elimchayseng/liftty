@@ -28,7 +28,7 @@ import { buildTrainingTools, type Training } from "./training";
  * The typed interface is identical to M2 (`buildTrainingTools`); only the execution path changes.
  * That's the whole point of the design — and why the M2 fallback is a one-line swap.
  */
-export function buildCodeModeTool(agent: Training, loader: WorkerLoader) {
+export function buildCodeModeTool(agent: Training, loader: WorkerLoader, opts?: { decoys?: number }) {
 	const executor = new DynamicWorkerExecutor({
 		loader,
 		globalOutbound: null, // no network in the sandbox — capability-scoped to the four tools
@@ -37,8 +37,10 @@ export function buildCodeModeTool(agent: Training, loader: WorkerLoader) {
 
 	// Namespace the tools as `training.*` in the sandbox (default would be `codemode.*`).
 	// Sandbox-facing TypeScript types are auto-generated from each tool's jsonSchema() wrapper.
+	// `opts.decoys` (token-measurement study) appends N realistic no-op tools to the same object, so
+	// each adds a `training.*` type-block line to the generated sandbox typings.
 	const codemode = createCodeTool({
-		tools: [{ name: "training", tools: buildTrainingTools(agent) }],
+		tools: [{ name: "training", tools: buildTrainingTools(agent, { decoys: opts?.decoys }) }],
 		executor,
 	});
 
