@@ -1,5 +1,5 @@
 import { Agent, getAgentByName, routeAgentRequest } from "agents";
-import { generateText, stepCountIs } from "ai";
+import { streamText, stepCountIs } from "ai";
 import { getModel } from "./model";
 import { renderPlan } from "./views/plan";
 import { renderChat } from "./views/chat";
@@ -201,6 +201,52 @@ JS snippet that does the whole task — read, compute, and write in one snippet 
 result object. Prefer one snippet over multiple tool calls. Then answer the lifter in plain language,
 reporting only what actually changed (e.g. the exact exercises \`adjustProgram\` returned).`;
 
+/** Experiment variant (token-measurement study). Absent → today's behavior, byte-identical. */
+type PromptVariant = "parallel-nudge" | "parallel-strong" | "one-snippet";
+
+/**
+ * Tools-mode nudge: appended after the base coach prompt when variant === "parallel-nudge". Encourages
+ * the model to batch independent tool calls into a single turn so we can measure parallel-call impact.
+ */
+const PARALLEL_NUDGE =
+	"\n\nWhen multiple tool calls are independent of each other, invoke them all together in a single turn (parallel tool calls) rather than one at a time.";
+
+/**
+ * Tools-mode STRONG nudge: Anthropic's documented `<use_parallel_tool_calls>` system-prompt block
+ * ("recommended if the default isn't sufficient" — platform docs, Parallel tool use). Used when
+ * variant === "parallel-strong" to test the strongest documented counterfactual to the study's
+ * "Sonnet serializes, so Code Mode wins" cell.
+ */
+const PARALLEL_STRONG = `
+
+<use_parallel_tool_calls>
+For maximum efficiency, whenever you perform multiple independent operations, invoke all relevant tools simultaneously rather than sequentially. Prioritize calling tools in parallel whenever possible. For example, when reading the program and history, run both tool calls in parallel to read both into context at the same time; when logging several sets, emit all logSet calls together in one turn. Err on the side of maximizing parallel tool calls rather than running too many tools sequentially.
+</use_parallel_tool_calls>`;
+
+/**
+ * Code-Mode replacement hint used when variant === "one-snippet": stronger "exactly one snippet"
+ * framing. Used INSTEAD OF `CODEMODE_HINT` (never both) so the two hints don't stack.
+ */
+const ONE_SNIPPET_HINT =
+	"\n\nYou have one tool, `codemode`, exposing the typed training API as `training.*`. Complete the ENTIRE task in exactly ONE snippet — never split work across multiple codemode calls. Hold intermediate results in JS variables and compute any dependent values inside that same snippet; only the final summary object returns. Then answer the lifter in plain language, reporting only what actually changed.";
+
+/**
+ * Compose the system prompt for a chat turn. Default (no variant) is byte-identical to before:
+ * `coachSystem + (codemode ? CODEMODE_HINT : "")`. The two experiment variants each swap in exactly
+ * one modification, and only when they apply to the active mode.
+ */
+function computeSystem(state: State, useCodeMode: boolean, variant?: PromptVariant): string {
+	const base = coachSystem(state);
+	if (useCodeMode) {
+		// one-snippet REPLACES the normal hint; otherwise use the normal Code Mode hint.
+		return base + (variant === "one-snippet" ? ONE_SNIPPET_HINT : CODEMODE_HINT);
+	}
+	// Tools mode: parallel-nudge appends a line; parallel-strong appends Anthropic's documented block.
+	if (variant === "parallel-nudge") return base + PARALLEL_NUDGE;
+	if (variant === "parallel-strong") return base + PARALLEL_STRONG;
+	return base;
+}
+
 /** Which program day is "today": the one after the most recently logged session's focus. */
 function todayIndex(days: PrescribedDay[], recent: SessionRow[]): number {
 	if (!days.length || !recent.length) return 0;
@@ -233,7 +279,7 @@ export class LifttyAgent extends Agent<Env, State> implements Training {
 	}
 
 	getHistory(exercise?: string, limit = 10): SessionLog[] {
-		const rows = this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 50`;
+		const rows = this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 200`;
 		const logs = rows.map((r): SessionLog => {
 			let a: { focus?: string; summary?: string; week?: number; day?: string } = {};
 			try {
@@ -335,12 +381,65 @@ export class LifttyAgent extends Agent<Env, State> implements Training {
 	}
 	}
 
-	/** Admin: reset to the pristine seed (repeatable demos). Gated by a route + RESEED_TOKEN. */
-	reseed(): { ok: true } {
+	/**
+	 * Admin: reset to the pristine seed (repeatable demos). Gated by a route + RESEED_TOKEN.
+	 *
+	 * `extraSessions` (token-measurement study): after the normal seed, deterministically insert that
+	 * many synthetic completed sessions so a fat-history read is possible. Fully deterministic — no
+	 * randomness: focus cycles Day A/B/C, weights climb a few lb per synthetic "week", and dates are
+	 * back-dated into `2025-06-XX` so they never collide with the 8 real Dec-2025/Jan-2026 rows.
+	 */
+	reseed(extraSessions?: number): { ok: true } {
 		this.sql`DELETE FROM sessions`;
 		this.seedSessions();
 		this.setState(SEED_STATE);
+
+		const extra = Math.max(0, Math.floor(extraSessions ?? 0));
+		if (extra > 0) {
+			const cycle = [
+				{ day: "Day A", focus: "Front Squat", base: 100 },
+				{ day: "Day B", focus: "Incline Bench", base: 80 },
+				{ day: "Day C", focus: "Hang Clean", base: 90 },
+			];
+			for (let i = 0; i < extra; i++) {
+				const c = cycle[i % 3];
+				const synthWeek = Math.floor(i / 3); // 3 days per synthetic week
+				const weight = c.base + synthWeek * 5; // +5 lb per synthetic week, no randomness
+				// Back-date within June 2025 (day-of-month 01..28, cycling) — safely before the real rows.
+				const dom = String((i % 28) + 1).padStart(2, "0");
+				const id = `synth-${i}`;
+				const date = `2025-06-${dom}`;
+				const summary = `${c.focus} 4×8 @ ${weight} (synthetic history row ${i}).`;
+				const actuals = JSON.stringify({ focus: c.focus, summary, week: synthWeek + 1, day: c.day });
+				this.sql`INSERT INTO sessions (id, date, status, prescribed, actuals)
+					VALUES (${id}, ${date}, ${"completed"}, ${"{}"}, ${actuals})
+					ON CONFLICT(id) DO UPDATE SET date = excluded.date, status = excluded.status, actuals = excluded.actuals`;
+			}
+		}
 		return { ok: true };
+	}
+
+	/**
+	 * Debug snapshot for the token-measurement harness (gated by the /state route + RESEED_TOKEN).
+	 * Flattens live program weights and counts rows/active sets so the harness can assert ground truth
+	 * after a run without parsing the chat reply.
+	 */
+	dumpState(): { ok: true; lifts: Record<string, number>; sessions: number; activeLoggedSets: number } {
+		const lifts: Record<string, number> = {};
+		for (const d of this.state.program.days) {
+			for (const l of d.lifts) {
+				if (l.weight == null) continue; // skip bodyweight/rounds work with no load
+				if (l.exercise in lifts) continue; // first occurrence wins on duplicate names
+				lifts[l.exercise] = l.weight;
+			}
+		}
+		const [row] = this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM sessions`;
+		return {
+			ok: true,
+			lifts,
+			sessions: row?.n ?? 0,
+			activeLoggedSets: this.state.activeSession?.loggedSets.length ?? 0,
+		};
 	}
 
 	/** RPC: everything the /plan view needs, in one round-trip. */
@@ -364,43 +463,74 @@ export class LifttyAgent extends Agent<Env, State> implements Training {
 		if (request.method !== "POST") {
 			return Response.json({ error: "POST { message } here" }, { status: 405 });
 		}
-		let body: { message?: string; mode?: "codemode" | "tools" };
+		// `variant` + `decoys` are token-measurement experiment axes (token study). Absent → behavior is
+		// byte-identical to before.
+		type ChatBody = {
+			message?: string;
+			mode?: "codemode" | "tools";
+			runId?: string;
+			model?: string;
+			variant?: PromptVariant;
+			decoys?: number;
+		};
+		let body: ChatBody;
 		try {
-			body = (await request.json()) as { message?: string; mode?: "codemode" | "tools" };
+			body = (await request.json()) as ChatBody;
 		} catch {
 			return Response.json({ error: "body must be JSON: { message, mode? }" }, { status: 400 });
 		}
-		const { message, mode } = body;
+		const { message, mode, runId, model, variant, decoys } = body;
 		if (!message) {
 			return Response.json({ error: "missing 'message'" }, { status: 400 });
 		}
 		const useCodeMode = mode !== "tools"; // Code Mode is the default (M3); pass mode:"tools" to fall back
+		const flowMode = useCodeMode ? "codemode" : "tools";
+		// Measured runs may override the model to compare token cost / batching across models.
+		const modelId = model || this.env.MODEL;
 
 		try {
-			const result = await generateText({
-				model: getModel(this.env),
-				system: coachSystem(this.state) + (useCodeMode ? CODEMODE_HINT : ""),
+			// STREAMING is required for correctness on this endpoint: Heroku Managed Inference rejects
+			// long non-streaming completions with "Request timed out. Please use streaming…", and the AI
+			// SDK then retries — which the gateway logs as duplicate requests under the same run_id,
+			// double-counting tokens. streamText keeps the connection alive so long codemode/large-payload
+			// flows complete in one gateway request each. We consume the stream server-side (no client SSE)
+			// and read the aggregated result, so the JSON response shape is unchanged.
+			//
+			// A `runId` marks a MEASURED run: it tags this flow's gateway requests via cf-aig-metadata so
+			// the harness can group them by run_id. Normal chat (no runId) sends no metadata header.
+			// No temperature is set — `claude-opus-4-8` rejects the arg and Anthropic exposes no seed; the
+			// harness runs N times and reports the spread (median primary).
+			const result = streamText({
+				model: getModel(this.env, runId ? { runId, mode: flowMode, model: modelId, variant, decoys } : undefined),
+				system: computeSystem(this.state, useCodeMode, variant),
 				prompt: message,
-				tools: useCodeMode ? buildCodeModeTool(this, this.env.LOADER) : buildTrainingTools(this),
+				tools: useCodeMode ? buildCodeModeTool(this, this.env.LOADER, { decoys }) : buildTrainingTools(this, { decoys }),
 				// Code Mode collapses a multi-step request into one snippet, so fewer model steps are needed.
 				stopWhen: stepCountIs(useCodeMode ? 5 : 8),
 			});
+			await result.consumeStream(); // drain server-side so the whole multi-step run completes
+			const steps = await result.steps;
+			const text = await result.text;
+			const usage = await result.totalUsage; // SDK-side token accounting (fallback if gateway logs 0 on streams)
 
 			// Surface which tools ran across all steps. In Code Mode this is ["codemode"] even when the
 			// snippet made several training.* calls — the whole point: one call, not four round-trips.
-			const toolsUsed = result.steps.flatMap((s) => s.toolCalls.map((c) => c.toolName));
+			const toolsUsed = steps.flatMap((s) => s.toolCalls.map((c) => c.toolName));
 			// Pull the JS snippet(s) the coach wrote (the codemode tool input) — the demo shows this.
-			const code = result.steps
+			const code = steps
 				.flatMap((s) => s.toolCalls)
 				.filter((c) => c.toolName === "codemode")
 				.map((c) => (c.input as { code?: string }).code)
 				.filter((c): c is string => typeof c === "string");
 
 			return Response.json({
-				reply: result.text,
-				mode: useCodeMode ? "codemode" : "tools",
+				reply: text,
+				mode: flowMode,
 				toolsUsed,
-				steps: result.steps.length,
+				steps: steps.length,
+				usageIn: usage.inputTokens ?? 0, // SDK-reported input tokens (per-flow total across steps)
+				usageOut: usage.outputTokens ?? 0,
+				...(runId ? { runId, model: modelId } : {}), // echoed so the harness can sanity-check the tag it sent
 				...(code.length ? { code } : {}),
 			});
 		} catch (err) {
@@ -409,7 +539,7 @@ export class LifttyAgent extends Agent<Env, State> implements Training {
 			// clean message instead of a framework 500 dumping a stack trace to the client.
 			console.error("chat onRequest failed:", err);
 			return Response.json(
-				{ error: "coach request failed to complete", mode: useCodeMode ? "codemode" : "tools" },
+				{ error: "coach request failed to complete", mode: flowMode },
 				{ status: 502 },
 			);
 		}
@@ -433,12 +563,24 @@ export default {
 		}
 
 		// Admin reset for repeatable demos. Disabled unless RESEED_TOKEN is set (safe by default).
+		// Optional `&sessions=N` seeds N synthetic history rows on top of the pristine seed (study).
 		if (url.pathname === "/reseed") {
 			if (!env.RESEED_TOKEN) return new Response("reseed disabled — set the RESEED_TOKEN secret to enable", { status: 404 });
 			if (url.searchParams.get("token") !== env.RESEED_TOKEN) return new Response("forbidden", { status: 403 });
+			const raw = url.searchParams.get("sessions");
+			const n = raw != null ? parseInt(raw, 10) : 0;
+			const extra = Number.isFinite(n) && n > 0 ? n : 0;
 			const me = await getAgentByName(env.LifttyAgent, "me");
-			await me.reseed();
-			return Response.json({ ok: true, message: "reseeded to pristine" });
+			await me.reseed(extra);
+			return Response.json({ ok: true, message: "reseeded to pristine", extraSessions: extra });
+		}
+
+		// Debug snapshot for the token-measurement harness. Gated EXACTLY like /reseed.
+		if (url.pathname === "/state") {
+			if (!env.RESEED_TOKEN) return new Response("state disabled — set the RESEED_TOKEN secret to enable", { status: 404 });
+			if (url.searchParams.get("token") !== env.RESEED_TOKEN) return new Response("forbidden", { status: 403 });
+			const me = await getAgentByName(env.LifttyAgent, "me");
+			return Response.json(await me.dumpState());
 		}
 
 		// /session lands in M4.
