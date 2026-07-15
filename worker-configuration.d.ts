@@ -10,6 +10,7 @@ interface __BaseEnv_Env {
 	HEROKU_INFERENCE_KEY: string;
 	AIG_TOKEN: string;
 	RESEED_TOKEN: string;
+	DB_KEY: string;
 	LifttyAgent: DurableObjectNamespace<import("./src/server").LifttyAgent>;
 }
 declare namespace Cloudflare {
