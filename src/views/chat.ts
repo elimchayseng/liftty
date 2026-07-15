@@ -120,6 +120,22 @@ export function renderChat(): string {
     }
     log.scrollTop = log.scrollHeight;
   }
+  function addPlugins(plugins) {
+    if (!plugins || !plugins.length) return;
+    for (const p of plugins) {
+      const d = document.createElement('div');
+      d.className = 'code';
+      const cap = document.createElement('span');
+      cap.className = 'cap';
+      cap.textContent = 'plugin authored · ' + (p.name || 'policy') + ' · persists + fires on every set, 0 tokens';
+      const pre = document.createElement('pre');
+      pre.textContent = p.source || '';
+      d.appendChild(cap);
+      d.appendChild(pre);
+      log.appendChild(d);
+    }
+    log.scrollTop = log.scrollHeight;
+  }
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -142,6 +158,7 @@ export function renderChat(): string {
       } else {
         thinking.textContent = data.reply || '(no reply)';
         addCode(data.code);
+        addPlugins(data.plugins);
         addTools(data.toolsUsed);
       }
     } catch (err) {

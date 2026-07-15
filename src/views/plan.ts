@@ -1,12 +1,14 @@
 import type { State, SessionRow, Lift, PrescribedDay } from "../server";
+import type { PluginSummary } from "../training";
 
 /**
  * Server-rendered /plan — the gym reference page. Mobile-first, dark, big type.
  * "Today" advances as sessions are logged (the day after the most recent focus).
  * Data is real (derived from prev-coach-handoff.md + workout-log.csv).
  */
-export function renderPlan(data: { state: State; recentSessions: SessionRow[]; today: number }): string {
+export function renderPlan(data: { state: State; recentSessions: SessionRow[]; today: number; plugins?: PluginSummary[] }): string {
 	const { state, recentSessions, today } = data;
+	const plugins = data.plugins ?? [];
 	const { lifter, program } = state;
 	const days = program.days;
 	const todayDay = days[today];
@@ -99,6 +101,13 @@ export function renderPlan(data: { state: State; recentSessions: SessionRow[]; t
   <h2 class="section">Coming up</h2>
   ${upcoming.map((d) => renderDayCard(d, false)).join("")}
 
+  ${
+		plugins.length
+			? `<h2 class="section">Active policies <span class="muted">— model-authored, run on every set (0 tokens)</span></h2>
+  <div class="card">${plugins.map(renderPlugin).join("")}</div>`
+			: ""
+	}
+
   <h2 class="section">Recent sessions <span class="muted">(Dec–Jan block)</span></h2>
   ${
 		recentSessions.length
@@ -143,6 +152,28 @@ function renderLift(l: Lift): string {
 	return `<div class="lift">
     <span class="name">${esc(l.exercise)}${noteLine}</span>
     ${rx}
+  </div>`;
+}
+
+function renderPlugin(p: PluginSummary): string {
+	let last = "";
+	if (p.last_result) {
+		try {
+			const r = JSON.parse(p.last_result) as { ok?: boolean; ms?: number; cold?: boolean; actions?: number; error?: string };
+			last = r.ok
+				? `last fired: ${r.ms ?? "?"} ms · ${r.cold ? "cold" : "warm"} · ${r.actions ?? 0} action${r.actions === 1 ? "" : "s"} · 0 tokens`
+				: `last error: ${r.error ?? "unknown"}`;
+		} catch {
+			/* ignore */
+		}
+	} else {
+		last = "not fired yet";
+	}
+	const badge = p.enabled ? "" : " · disabled";
+	return `<div class="main">
+    <span class="mname">${esc(p.name)}</span>
+    <span class="goal3"><b>v${p.version}</b>${esc(badge)}</span>
+    <span class="meta">${esc(last)}</span>
   </div>`;
 }
 

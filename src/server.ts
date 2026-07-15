@@ -1,18 +1,29 @@
-import { Agent, getAgentByName, routeAgentRequest } from "agents";
+import { Agent, getAgentByName, routeAgentRequest, type Connection, type ConnectionContext, type WSMessage } from "agents";
 import { streamText, stepCountIs } from "ai";
 import { getModel } from "./model";
 import { renderPlan } from "./views/plan";
 import { renderChat } from "./views/chat";
+import { renderSession } from "./views/session";
 import { buildCodeModeTool } from "./codemode";
 import {
 	buildTrainingTools,
 	type Training,
+	type PluginAuthoring,
+	type PluginSummary,
 	type ProgramView,
 	type SessionLog,
 	type SetInput,
 	type ProgramChange,
 	type AdjustResult,
 } from "./training";
+import {
+	createPlugin as createPluginImpl,
+	runPlugins,
+	toSummary,
+	type PluginHost,
+	type PluginRow,
+	type PluginEvent,
+} from "./plugins";
 
 /**
  * liftty — a stateful lifting coach.
@@ -199,7 +210,19 @@ You have one tool, \`codemode\`, exposing the typed training API as \`training.*
 to read the program/history or log sets or adjust the program, call \`codemode\` with a SINGLE async
 JS snippet that does the whole task — read, compute, and write in one snippet — and return a small
 result object. Prefer one snippet over multiple tool calls. Then answer the lifter in plain language,
-reporting only what actually changed (e.g. the exact exercises \`adjustProgram\` returned).`;
+reporting only what actually changed (e.g. the exact exercises \`adjustProgram\` returned).
+
+PLUGINS (persistent policies). When the lifter states a RULE they want enforced on every future set
+— not a one-off change — compile it into a plugin with \`training.createPlugin({ name, source })\`
+instead of adjusting the program yourself. \`source\` is an ES module:
+    export default { onSetLogged(event) { return { actions: [/* ProgramChange[] */], note } } }
+The \`event\` is pure data: { set:{exercise,reps,weight}, failed, prescribed, program, recentHistory,
+activeSession }. Return \`actions\` — an array of ProgramChange, ONLY { op:"deload", pct? } or
+{ op:"setExerciseWeight", exercise, weight } (max 3 per event). The plugin is a PURE FUNCTION: it
+RETURNS proposed changes and NEVER mutates state or calls the network — the runtime applies them
+through the validated path and then fires the plugin on every logged set with zero tokens (no model
+on that path). The source is dry-run-validated before it is saved. Use \`training.listPlugins()\` /
+\`training.setPluginEnabled({ id, enabled })\` to inspect or toggle saved policies.`;
 
 /** Experiment variant (token-measurement study). Absent → today's behavior, byte-identical. */
 type PromptVariant = "parallel-nudge" | "parallel-strong" | "one-snippet";
@@ -247,6 +270,12 @@ function computeSystem(state: State, useCodeMode: boolean, variant?: PromptVaria
 	return base;
 }
 
+/** Rest timer (seconds) for a logged set: client-supplied, clamped to a sane range; default 180. */
+function clampRest(rest?: number): number {
+	if (typeof rest !== "number" || !Number.isFinite(rest) || rest <= 0) return 180;
+	return Math.min(600, Math.max(5, Math.floor(rest)));
+}
+
 /** Which program day is "today": the one after the most recently logged session's focus. */
 function todayIndex(days: PrescribedDay[], recent: SessionRow[]): number {
 	if (!days.length || !recent.length) return 0;
@@ -260,7 +289,7 @@ function todayIndex(days: PrescribedDay[], recent: SessionRow[]): number {
 	return 0;
 }
 
-export class LifttyAgent extends Agent<Env, State> implements Training {
+export class LifttyAgent extends Agent<Env, State> implements Training, PluginAuthoring {
 	initialState = SEED_STATE;
 
 	// --- Typed Training API (M2). Same interface Code Mode will route through in M3. ---
@@ -318,7 +347,11 @@ export class LifttyAgent extends Agent<Env, State> implements Training {
 		const changed: string[] = [];
 		switch (change.op) {
 			case "deload": {
-				const pct = change.pct ?? 10;
+				// Clamp magnitude here, in the one validated write path, so BOTH the tools path (jsonSchema
+				// min/max is NOT runtime-enforced) and the plugin path (sanitizeActions accepts any finite
+				// pct) are bounded. Without this, a plugin returning pct=100 zeroes every lift and pct>100
+				// goes negative — the blast radius the plugin feature exists to bound.
+				const pct = Math.min(50, Math.max(1, change.pct ?? 10));
 				for (const d of program.days)
 					for (const l of d.lifts)
 						if (l.weight != null) {
@@ -330,10 +363,11 @@ export class LifttyAgent extends Agent<Env, State> implements Training {
 			}
 			case "setExerciseWeight": {
 				const q = change.exercise.toLowerCase();
+				const weight = Math.min(1000, Math.max(0, change.weight)); // bound magnitude (see deload note)
 				for (const d of program.days)
 					for (const l of d.lifts)
 						if (l.exercise.toLowerCase().includes(q)) {
-							l.weight = change.weight;
+							l.weight = weight;
 							changed.push(l.exercise);
 						}
 				break;
@@ -350,6 +384,143 @@ export class LifttyAgent extends Agent<Env, State> implements Training {
 		return { program: this.getProgram(), changed: [...new Set(changed)] };
 	}
 
+	// --- M4: live workout session over WebSocket (hibernation + alarms) ---
+	//
+	// The Agents SDK wraps `onConnect`/`onMessage`: its wrapper handles the framework's own protocol
+	// frames (state sync `cf_agent_state`, RPC) and forwards any OTHER message to the overrides below.
+	// So our custom `{type:"log_set"}` frames land here while `setState`'s auto-broadcast + RPC keep
+	// working untouched. Hibernation is automatic — between sets the DO sleeps; the socket stays open
+	// and the alarm (`schedule → restOver`) wakes it. Nothing here opts out (no `hibernate:false`).
+
+	/** The prescribed day treated as "today" — the day after the most recently logged session's focus. */
+	private todayDay(): PrescribedDay {
+		const recent = this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 1`;
+		return this.state.program.days[todayIndex(this.state.program.days, recent)];
+	}
+
+	/** A phone opening /session: ensure an active session exists, then send the prescribed day. */
+	async onConnect(connection: Connection, _ctx: ConnectionContext): Promise<void> {
+		const today = this.todayDay();
+		if (!this.state.activeSession) {
+			this.setState({
+				...this.state,
+				activeSession: { startedAt: new Date().toISOString(), day: today?.focus ?? "Session", loggedSets: [] },
+			});
+		}
+		const dayFocus = this.state.activeSession?.day ?? today?.focus;
+		const day = this.state.program.days.find((d) => d.focus === dayFocus) ?? today;
+		connection.send(
+			JSON.stringify({
+				type: "session_hello",
+				day: day?.focus ?? "Session",
+				dayLabel: day?.day ?? "",
+				lifts: day?.lifts ?? [],
+				activeSession: this.state.activeSession,
+			}),
+		);
+	}
+
+	/**
+	 * A logged set from the phone. This is the framing-correction-#2 dispatch site: the trigger is the
+	 * WS event, not an agent tool choice — no LLM call, no context window, anywhere on this path.
+	 * `logSet` (already validated) mutates state (auto-broadcast), then M5 plugins fire on the event,
+	 * then a rest alarm is scheduled.
+	 */
+	async onMessage(connection: Connection, message: WSMessage): Promise<void> {
+		let msg: { type?: string; exercise?: string; reps?: number; weight?: number; failed?: boolean; rest?: number };
+		try {
+			msg = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message));
+		} catch {
+			return; // non-JSON / binary — not ours (SDK protocol frames were handled by the wrapper)
+		}
+		if (msg.type !== "log_set") return;
+		try {
+			if (!msg.exercise || typeof msg.reps !== "number") {
+				connection.send(JSON.stringify({ type: "error", message: "log_set needs exercise + reps" }));
+				return;
+			}
+			const res = this.logSet({ exercise: msg.exercise, reps: msg.reps, weight: msg.weight });
+			connection.send(
+				JSON.stringify({ type: "set_logged", exercise: msg.exercise, reps: msg.reps, weight: msg.weight ?? null, failed: !!msg.failed, ...res }),
+			);
+
+			// M5: persistent, model-authored plugins fire on THIS event — deterministically, zero
+			// tokens, model nowhere in sight. This dispatch site is framing-correction-#2's proof:
+			// the trigger is the WS event, not an agent tool choice.
+			await this.firePlugins({ set: { exercise: msg.exercise, reps: msg.reps, weight: msg.weight }, failed: !!msg.failed });
+
+			const rest = clampRest(msg.rest);
+			await this.schedule(rest, "restOver", { exercise: msg.exercise });
+			this.broadcast(JSON.stringify({ type: "rest_started", exercise: msg.exercise, seconds: rest }));
+		} catch (err) {
+			connection.send(JSON.stringify({ type: "error", message: err instanceof Error ? err.message : String(err) }));
+		}
+	}
+
+	/** Rest alarm fired (DO woke from hibernation): tell every connected client the timer is up. */
+	async restOver(payload: { exercise?: string }): Promise<void> {
+		this.broadcast(JSON.stringify({ type: "rest_over", exercise: payload?.exercise ?? null }));
+	}
+
+	// --- M5: Liftty Plugins. Three thin authoring methods (typed + exposed as jsonSchema() tools that
+	// auto-flow into Code Mode) delegate to src/plugins.ts's two public functions; firePlugins is the
+	// hot-path hook the WS log_set event calls. See src/plugins.ts for the hand-rolled↔productized map.
+
+	/** The minimal capability surface src/plugins.ts runs against (DO's `env` stays protected). */
+	private pluginHost(): PluginHost {
+		return {
+			sql: this.sql.bind(this),
+			loader: this.env.LOADER,
+			adjustProgram: (change: ProgramChange) => this.adjustProgram(change),
+		};
+	}
+
+	/** Author-time: dry-run + persist a model-authored policy. Prototypes MODULES.put(). */
+	async createPlugin(input: { name: string; source: string }): Promise<{ id: string; name: string; version: number }> {
+		return createPluginImpl(this.pluginHost(), input);
+	}
+
+	/** List saved plugins (newest bookkeeping included) for the authoring tools + /plan. */
+	listPlugins(): PluginSummary[] {
+		return this.sql<PluginRow>`SELECT * FROM plugins ORDER BY created_at ASC`.map(toSummary);
+	}
+
+	/** Toggle a plugin on/off; a disabled plugin is skipped by runPlugins. */
+	setPluginEnabled(input: { id: string; enabled: boolean }): { id: string; enabled: boolean } {
+		this.sql`UPDATE plugins SET enabled = ${input.enabled ? 1 : 0} WHERE id = ${input.id}`;
+		return { id: input.id, enabled: input.enabled };
+	}
+
+	/**
+	 * Hot path: fire every enabled plugin on a logged-set event and broadcast a receipt per plugin.
+	 * Builds the full pure-data event from live state (plugins never read state directly), runs them
+	 * via the raw Worker Loader (no LLM, no tokens), and emits `plugin_fired` so /session renders
+	 * "auto-regulate fired · 4 ms · warm · 0 tokens". Wrapped so a plugin can never break logSet.
+	 */
+	async firePlugins(input: { set: { exercise: string; reps: number; weight?: number }; failed: boolean }): Promise<void> {
+		try {
+			const prescribed =
+				this.todayDay()?.lifts.find((l) => l.exercise.toLowerCase().includes(input.set.exercise.toLowerCase())) ?? null;
+			const event: PluginEvent = {
+				set: input.set,
+				failed: input.failed,
+				prescribed,
+				program: this.getProgram(),
+				recentHistory: this.getHistory(input.set.exercise, 10),
+				activeSession: this.state.activeSession,
+			};
+			const receipts = await runPlugins(this.pluginHost(), event);
+			for (const r of receipts) {
+				this.broadcast(
+					JSON.stringify({ type: "plugin_fired", name: r.name, ms: r.ms, cold: r.cold, changed: r.changed, ...(r.error ? { error: r.error } : {}) }),
+				);
+			}
+		} catch (err) {
+			// Defensive: firePlugins must never throw into the logSet path.
+			console.error("firePlugins failed:", err);
+		}
+	}
+
 	/** Runs on every wake (idempotent). Create tables; seed state + history ONCE per SEED_VERSION. */
 	async onStart() {
 		this.sql`CREATE TABLE IF NOT EXISTS sessions (
@@ -360,6 +531,20 @@ export class LifttyAgent extends Agent<Env, State> implements Training {
 			actuals TEXT NOT NULL DEFAULT '{}'
 		)`;
 		this.sql`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`;
+
+		// M5: the plugin registry — memo exhibit #1, the code storage the platform doesn't provide.
+		// A second table in the SAME per-user embedded SQLite DB, so it survives redeploy just like
+		// `sessions`. Model-authored JS source lives here; the raw Worker Loader executes it on events.
+		this.sql`CREATE TABLE IF NOT EXISTS plugins (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			source TEXT NOT NULL,
+			version INTEGER NOT NULL DEFAULT 1,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			created_at TEXT NOT NULL,
+			last_run TEXT,
+			last_result TEXT
+		)`;
 
 		const [row] = this.sql<{ value: string }>`SELECT value FROM meta WHERE key = 'seed_version'`;
 		const seeded = row ? parseInt(row.value, 10) : 0;
@@ -443,10 +628,15 @@ export class LifttyAgent extends Agent<Env, State> implements Training {
 	}
 
 	/** RPC: everything the /plan view needs, in one round-trip. */
-	async getPlanData(): Promise<{ state: State; recentSessions: SessionRow[]; today: number }> {
+	async getPlanData(): Promise<{ state: State; recentSessions: SessionRow[]; today: number; plugins: PluginSummary[] }> {
 		const recentSessions = this.sql<SessionRow>`
 			SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 10`;
-		return { state: this.state, recentSessions, today: todayIndex(this.state.program.days, recentSessions) };
+		return {
+			state: this.state,
+			recentSessions,
+			today: todayIndex(this.state.program.days, recentSessions),
+			plugins: this.listPlugins(),
+		};
 	}
 
 	/**
@@ -522,6 +712,14 @@ export class LifttyAgent extends Agent<Env, State> implements Training {
 				.filter((c) => c.toolName === "codemode")
 				.map((c) => (c.input as { code?: string }).code)
 				.filter((c): c is string => typeof c === "string");
+			// M5: surface any plugin the coach authored this turn so /chat can show its source (reuses
+			// the addCode renderer). In Code Mode the createPlugin call is inside a codemode snippet
+			// (already in `code`); in Tools mode it's a top-level `createPlugin` tool call.
+			const plugins = steps
+				.flatMap((s) => s.toolCalls)
+				.filter((c) => c.toolName === "createPlugin")
+				.map((c) => c.input as { name?: string; source?: string })
+				.filter((p): p is { name: string; source: string } => typeof p?.name === "string" && typeof p?.source === "string");
 
 			return Response.json({
 				reply: text,
@@ -532,6 +730,7 @@ export class LifttyAgent extends Agent<Env, State> implements Training {
 				usageOut: usage.outputTokens ?? 0,
 				...(runId ? { runId, model: modelId } : {}), // echoed so the harness can sanity-check the tag it sent
 				...(code.length ? { code } : {}),
+				...(plugins.length ? { plugins } : {}),
 			});
 		} catch (err) {
 			// New failure surface under Code Mode: a sandbox load/entitlement error (e.g. LOADER not
@@ -562,6 +761,12 @@ export default {
 			return new Response(renderChat(), { headers: { "content-type": "text/html; charset=utf-8" } });
 		}
 
+		// M4: the live workout stage. Server-rendered page opens a raw WS to the agent (routed by the
+		// routeAgentRequest fallthrough below at /agents/liftty-agent/me).
+		if (url.pathname === "/session") {
+			return new Response(renderSession(), { headers: { "content-type": "text/html; charset=utf-8" } });
+		}
+
 		// Admin reset for repeatable demos. Disabled unless RESEED_TOKEN is set (safe by default).
 		// Optional `&sessions=N` seeds N synthetic history rows on top of the pristine seed (study).
 		if (url.pathname === "/reseed") {
@@ -583,7 +788,7 @@ export default {
 			return Response.json(await me.dumpState());
 		}
 
-		// /session lands in M4.
+		// WS upgrades (/agents/liftty-agent/me from /session) + any other agent routes.
 		return (
 			(await routeAgentRequest(request, env)) ||
 			new Response("Not found", { status: 404 })

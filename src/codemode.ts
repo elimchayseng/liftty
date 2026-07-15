@@ -1,6 +1,6 @@
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import { createCodeTool } from "@cloudflare/codemode/ai";
-import { buildTrainingTools, type Training } from "./training";
+import { buildTrainingTools, type Training, type PluginAuthoring } from "./training";
 
 /**
  * Code Mode (M3) — the same four typed Training methods, one tool.
@@ -28,7 +28,7 @@ import { buildTrainingTools, type Training } from "./training";
  * The typed interface is identical to M2 (`buildTrainingTools`); only the execution path changes.
  * That's the whole point of the design — and why the M2 fallback is a one-line swap.
  */
-export function buildCodeModeTool(agent: Training, loader: WorkerLoader, opts?: { decoys?: number }) {
+export function buildCodeModeTool(agent: Training & PluginAuthoring, loader: WorkerLoader, opts?: { decoys?: number }) {
 	const executor = new DynamicWorkerExecutor({
 		loader,
 		globalOutbound: null, // no network in the sandbox — capability-scoped to the four tools
