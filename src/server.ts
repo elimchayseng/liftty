@@ -347,7 +347,11 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 		const changed: string[] = [];
 		switch (change.op) {
 			case "deload": {
-				const pct = change.pct ?? 10;
+				// Clamp magnitude here, in the one validated write path, so BOTH the tools path (jsonSchema
+				// min/max is NOT runtime-enforced) and the plugin path (sanitizeActions accepts any finite
+				// pct) are bounded. Without this, a plugin returning pct=100 zeroes every lift and pct>100
+				// goes negative — the blast radius the plugin feature exists to bound.
+				const pct = Math.min(50, Math.max(1, change.pct ?? 10));
 				for (const d of program.days)
 					for (const l of d.lifts)
 						if (l.weight != null) {
@@ -359,10 +363,11 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 			}
 			case "setExerciseWeight": {
 				const q = change.exercise.toLowerCase();
+				const weight = Math.min(1000, Math.max(0, change.weight)); // bound magnitude (see deload note)
 				for (const d of program.days)
 					for (const l of d.lifts)
 						if (l.exercise.toLowerCase().includes(q)) {
-							l.weight = change.weight;
+							l.weight = weight;
 							changed.push(l.exercise);
 						}
 				break;
