@@ -16,7 +16,7 @@ export function renderLanding(): string {
   .avatar-frame img { width: 160px; height: 160px; image-rendering: pixelated; display: block; }
   .land .mark { font-family: var(--display); font-weight: 900; font-size: 60px; letter-spacing: -0.03em; line-height: 0.9; }
   .land .rule { width: 56px; height: 3px; background: var(--marker); margin-top: 16px; }
-  .entries { margin-top: auto; display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+  .entries { margin-top: 36px; display: flex; flex-direction: column; border-top: 1px solid var(--line); }
   .entry { display: flex; align-items: center; justify-content: space-between; padding: 20px 4px; border-bottom: 1px solid var(--line); color: var(--ink); }
   .entry:hover { color: var(--ink); }
   .entry .label { font-family: var(--display); font-weight: 700; font-size: 19px; }
