@@ -152,6 +152,7 @@ export function renderSession(): string {
   // Session view state, so we can re-render prescriptions live when a policy edits the program.
   var currentFocus = null;         // today's day focus, e.g. "Front Squat"
   var lastWeights = {};            // exercise -> last-seen prescribed weight (change detection + flash)
+  var lastScheme = {};             // exercise -> last-seen "sets x reps" (scheme change detection + flash)
   var haveBaseline = false;        // suppress the flash on the very first render
   var progRefs = [];               // [{exercise, sets, el}] so set-progress updates without a full re-render
 
@@ -194,8 +195,12 @@ export function renderSession(): string {
     lifts.forEach(function (l) {
       if (l.kind === 'rounds') return; // circuits aren't set-logged here
       var w = (l.weight != null ? l.weight : null);
+      var sch = l.sets + 'x' + l.reps;
       var prev = lastWeights.hasOwnProperty(l.exercise) ? lastWeights[l.exercise] : undefined;
-      var changed = haveBaseline && prev !== undefined && prev !== w;
+      var schPrev = lastScheme.hasOwnProperty(l.exercise) ? lastScheme[l.exercise] : undefined;
+      var weightMoved = haveBaseline && prev !== undefined && prev !== w;
+      var schemeMoved = haveBaseline && schPrev !== undefined && schPrev !== sch;
+      var changed = weightMoved || schemeMoved;
 
       var row = document.createElement('div');
       row.className = 'lift' + (changed ? ' changed' : '');
@@ -210,7 +215,8 @@ export function renderSession(): string {
       var rxHtml = l.sets + ' × ' + l.reps;
       if (w != null) rxHtml += ' @ <span class="wt">' + w + ' lb' + (l.perSide ? ' /side' : '') + '</span>';
       else rxHtml += ' @ <span class="wt">BW</span>';
-      if (changed) rxHtml += '<span class="delta">' + (w > prev ? '▲' : '▼') + ' was ' + prev + '</span>';
+      if (weightMoved) rxHtml += '<span class="delta">' + (w > prev ? '▲' : '▼') + ' was ' + prev + ' lb</span>';
+      else if (schemeMoved) rxHtml += '<span class="delta">was ' + schPrev.replace('x', '×') + '</span>';
       rx.innerHTML = rxHtml;
 
       var done = loggedCount(active, l.exercise);
@@ -248,18 +254,21 @@ export function renderSession(): string {
 
       progRefs.push({ exercise: l.exercise, sets: l.sets, el: prog });
       lastWeights[l.exercise] = w;
+      lastScheme[l.exercise] = sch;
     });
     haveBaseline = true;
   }
 
-  // True if any prescribed weight differs from what we last rendered (i.e. a policy edited the program).
-  function weightsChanged(lifts) {
+  // True if any prescribed weight OR sets×reps scheme differs from what we last rendered (i.e. the
+  // coach or a policy edited the program) — so a scheme change like Pull-ups 4×6 → 3×10 re-renders too.
+  function programChanged(lifts) {
     if (!lifts) return false;
     for (var i = 0; i < lifts.length; i++) {
       var l = lifts[i];
       if (l.kind === 'rounds') continue;
       var w = (l.weight != null ? l.weight : null);
       if (lastWeights.hasOwnProperty(l.exercise) && lastWeights[l.exercise] !== w) return true;
+      if (lastScheme.hasOwnProperty(l.exercise) && lastScheme[l.exercise] !== (l.sets + 'x' + l.reps)) return true;
     }
     return false;
   }
@@ -339,7 +348,7 @@ export function renderSession(): string {
         // lifter is mid-typing); always refresh the logged list + per-lift progress.
         if (msg.state) {
           var lifts = liftsFromState(msg.state);
-          if (lifts && weightsChanged(lifts)) renderLifts(lifts, msg.state.activeSession);
+          if (lifts && programChanged(lifts)) renderLifts(lifts, msg.state.activeSession);
           updateProgress(msg.state.activeSession);   // always: cheap, never resets inputs
           renderLogged(msg.state.activeSession);
         }

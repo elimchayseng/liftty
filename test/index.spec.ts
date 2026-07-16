@@ -358,3 +358,29 @@ describe("liftty /db explorer + demo reset (FLOW-LIVE-EVENTS)", () => {
 		expect((await SELF.fetch("https://example.com/reset-demo?key=" + KEY)).status).toBe(405);
 	});
 });
+
+describe("liftty program scheme edits (coach sets/reps)", () => {
+	// The coach can now change a sets×reps scheme, not just weight/deload — via the new
+	// setExerciseScheme op on the single validated adjustProgram write path.
+	it("changes sets and reps for matching lifts and reports them as changed", async () => {
+		const a = await agent("scheme-edit");
+		await a.reseed(); // pristine: Pull-ups 4×6
+		const res = await a.adjustProgram({ op: "setExerciseScheme", exercise: "Pull-ups", sets: 3, reps: 10 });
+		expect(res.changed).toContain("Pull-ups");
+		const pull = (await a.getProgram()).days.flatMap((d: { lifts: unknown[] }) => d.lifts).find((l: { exercise: string }) => l.exercise === "Pull-ups");
+		expect(pull.sets).toBe(3);
+		expect(pull.reps).toBe(10);
+	});
+
+	it("clamps out-of-range values and reports no change when already at target", async () => {
+		const a = await agent("scheme-clamp");
+		await a.reseed();
+		const r1 = await a.adjustProgram({ op: "setExerciseScheme", exercise: "Pull-ups", sets: 999 });
+		expect(r1.changed).toContain("Pull-ups");
+		const pull = (await a.getProgram()).days.flatMap((d: { lifts: unknown[] }) => d.lifts).find((l: { exercise: string }) => l.exercise === "Pull-ups");
+		expect(pull.sets).toBe(20); // clamped 1–20
+		// re-applying the same clamped value is a no-op: nothing "changed"
+		const r2 = await a.adjustProgram({ op: "setExerciseScheme", exercise: "Pull-ups", sets: 20 });
+		expect(r2.changed).not.toContain("Pull-ups");
+	});
+});

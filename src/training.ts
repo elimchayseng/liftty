@@ -38,6 +38,7 @@ export type SetInput = { exercise: string; reps: number; weight?: number };
 export type ProgramChange =
 	| { op: "deload"; pct?: number }
 	| { op: "setExerciseWeight"; exercise: string; weight: number }
+	| { op: "setExerciseScheme"; exercise: string; sets?: number; reps?: number }
 	| { op: "advanceWeek" }
 	| { op: "setPhase"; phase: string; goal?: string };
 
@@ -69,10 +70,12 @@ export interface PluginAuthoring {
 }
 
 type AdjustInput = {
-	op: "deload" | "setExerciseWeight" | "advanceWeek" | "setPhase";
+	op: "deload" | "setExerciseWeight" | "setExerciseScheme" | "advanceWeek" | "setPhase";
 	pct?: number;
 	exercise?: string;
 	weight?: number;
+	sets?: number;
+	reps?: number;
 	phase?: string;
 	goal?: string;
 };
@@ -127,14 +130,16 @@ export function buildTrainingTools(t: Training & PluginAuthoring, opts?: { decoy
 		}),
 		adjustProgram: tool({
 			description:
-				"Change the program and return { program, changed } where `changed` lists the exact exercises modified — report those to the lifter (note: `setExerciseWeight` matches by name substring, so 'front squat' can touch several variants). op=deload cuts working weights (optional pct, default 10); op=setExerciseWeight sets weight for lifts matching `exercise`; op=advanceWeek bumps the week; op=setPhase sets `phase` (and optional `goal`). Respect the lifter's injury constraints when adjusting.",
+				"Change the program and return { program, changed } where `changed` lists the exact exercises modified — report those to the lifter (note: `setExerciseWeight`/`setExerciseScheme` match by name substring, so 'front squat' can touch several variants). op=deload cuts working weights (optional pct, default 10); op=setExerciseWeight sets weight for lifts matching `exercise`; op=setExerciseScheme sets the sets×reps scheme for lifts matching `exercise` (pass `sets` and/or `reps` — e.g. change Pull-ups from 4×6 to 3×10; works for bodyweight lifts too); op=advanceWeek bumps the week; op=setPhase sets `phase` (and optional `goal`). Respect the lifter's injury constraints when adjusting.",
 			inputSchema: jsonSchema<AdjustInput>({
 				type: "object",
 				properties: {
-					op: { type: "string", enum: ["deload", "setExerciseWeight", "advanceWeek", "setPhase"] },
+					op: { type: "string", enum: ["deload", "setExerciseWeight", "setExerciseScheme", "advanceWeek", "setPhase"] },
 					pct: { type: "number", minimum: 1, maximum: 50, description: "for deload" },
-					exercise: { type: "string", description: "for setExerciseWeight" },
+					exercise: { type: "string", description: "for setExerciseWeight / setExerciseScheme" },
 					weight: { type: "number", description: "for setExerciseWeight" },
+					sets: { type: "integer", minimum: 1, maximum: 20, description: "for setExerciseScheme" },
+					reps: { type: "integer", minimum: 1, maximum: 100, description: "for setExerciseScheme" },
 					phase: { type: "string", description: "for setPhase" },
 					goal: { type: "string", description: "for setPhase" },
 				},
@@ -148,6 +153,10 @@ export function buildTrainingTools(t: Training & PluginAuthoring, opts?: { decoy
 					case "setExerciseWeight":
 						if (!c.exercise || c.weight == null) throw new Error("setExerciseWeight needs exercise + weight");
 						return t.adjustProgram({ op: "setExerciseWeight", exercise: c.exercise, weight: c.weight });
+					case "setExerciseScheme":
+						if (!c.exercise || (c.sets == null && c.reps == null))
+							throw new Error("setExerciseScheme needs exercise + at least one of sets/reps");
+						return t.adjustProgram({ op: "setExerciseScheme", exercise: c.exercise, sets: c.sets, reps: c.reps });
 					case "advanceWeek":
 						return t.adjustProgram({ op: "advanceWeek" });
 					case "setPhase":
