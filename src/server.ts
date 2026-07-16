@@ -4,6 +4,7 @@ import { getModel } from "./model";
 import { renderPlan } from "./views/plan";
 import { renderChat } from "./views/chat";
 import { renderSession } from "./views/session";
+import { renderLanding } from "./views/landing";
 import { FLOW_HTML } from "./views/flow";
 import { DB_HTML } from "./views/db";
 import { buildCodeModeTool } from "./codemode";
@@ -88,6 +89,12 @@ export type State = {
 		day: string;
 		loggedSets: { exercise: string; reps: number; weight: number }[];
 	};
+	// Per-user settings persisted in the DO. `restSeconds` is the default rest timer (seconds) between
+	// logged sets — coach-configurable ("rest 90 seconds") and editable from the /session chip. Optional
+	// so state seeded before this field falls back at read time (`settings?.restSeconds ?? 60`).
+	settings?: {
+		restSeconds: number;
+	};
 };
 
 // --- Seed derived from prev-coach-handoff.md + workout-log.csv ---
@@ -161,6 +168,7 @@ const SEED_STATE: State = {
 		],
 	},
 	activeSession: null,
+	settings: { restSeconds: 60 },
 };
 
 export type SessionRow = {
@@ -276,10 +284,13 @@ function computeSystem(state: State, useCodeMode: boolean, variant?: PromptVaria
 	return base;
 }
 
-/** Rest timer (seconds) for a logged set: client-supplied, clamped to a sane range; default 180. */
-function clampRest(rest?: number): number {
-	if (typeof rest !== "number" || !Number.isFinite(rest) || rest <= 0) return 180;
-	return Math.min(600, Math.max(5, Math.floor(rest)));
+/**
+ * Rest timer (seconds) for a logged set: use the per-set override if valid, else the user's configured
+ * default (`fallback`, itself defaulting to 60). Always clamped to a sane 5–600s range.
+ */
+function clampRest(rest?: number, fallback = 60): number {
+	const v = typeof rest === "number" && Number.isFinite(rest) && rest > 0 ? rest : fallback;
+	return Math.min(600, Math.max(5, Math.floor(v)));
 }
 
 /**
@@ -431,6 +442,17 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 		return { program: this.getProgram(), changed: [...new Set(changed)] };
 	}
 
+	/**
+	 * Set the default rest timer (seconds) between logged sets. Persisted in DO state (auto-broadcast),
+	 * so it survives reconnect + redeploy and drives the next `rest_started`. Exposed as a typed tool so
+	 * the coach can set it ("rest 90 seconds"); also called by the /session rest chip via a set_rest frame.
+	 */
+	setRestSeconds(input: { seconds: number }): { restSeconds: number } {
+		const restSeconds = Math.min(600, Math.max(5, Math.floor(input.seconds)));
+		this.setState({ ...this.state, settings: { ...this.state.settings, restSeconds } });
+		return { restSeconds };
+	}
+
 	// --- M4: live workout session over WebSocket (hibernation + alarms) ---
 	//
 	// The Agents SDK wraps `onConnect`/`onMessage`: its wrapper handles the framework's own protocol
@@ -463,6 +485,7 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 				dayLabel: day?.day ?? "",
 				lifts: day?.lifts ?? [],
 				activeSession: this.state.activeSession,
+				restSeconds: this.state.settings?.restSeconds ?? 60,
 			}),
 		);
 
@@ -492,11 +515,27 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 	 * then a rest alarm is scheduled.
 	 */
 	async onMessage(connection: Connection, message: WSMessage): Promise<void> {
-		let msg: { type?: string; exercise?: string; reps?: number; weight?: number; failed?: boolean; rest?: number };
+		let msg: { type?: string; exercise?: string; reps?: number; weight?: number; failed?: boolean; rest?: number; seconds?: number; sets?: number };
 		try {
 			msg = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message));
 		} catch {
 			return; // non-JSON / binary — not ours (SDK protocol frames were handled by the wrapper)
+		}
+		// NEW: the /session rest chip persists the default rest timer (setState auto-broadcasts it back).
+		if (msg.type === "set_rest") {
+			if (typeof msg.seconds === "number" && Number.isFinite(msg.seconds)) this.setRestSeconds({ seconds: msg.seconds });
+			return;
+		}
+		// NEW: the /session sets×reps chips edit the day's prescription via the validated adjustProgram path.
+		if (msg.type === "set_scheme") {
+			if (msg.exercise && (msg.sets != null || msg.reps != null)) {
+				try {
+					this.adjustProgram({ op: "setExerciseScheme", exercise: msg.exercise, sets: msg.sets, reps: msg.reps });
+				} catch (err) {
+					connection.send(JSON.stringify({ type: "error", message: err instanceof Error ? err.message : String(err) }));
+				}
+			}
+			return;
 		}
 		if (msg.type !== "log_set") return;
 		try {
@@ -514,7 +553,7 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 			// the trigger is the WS event, not an agent tool choice.
 			await this.firePlugins({ set: { exercise: msg.exercise, reps: msg.reps, weight: msg.weight }, failed: !!msg.failed });
 
-			const rest = clampRest(msg.rest);
+			const rest = clampRest(msg.rest, this.state.settings?.restSeconds ?? 60);
 			await this.schedule(rest, "restOver", { exercise: msg.exercise });
 			this.broadcast(JSON.stringify({ type: "rest_started", exercise: msg.exercise, seconds: rest }));
 		} catch (err) {
@@ -774,7 +813,7 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 	 * Flattens live program weights and counts rows/active sets so the harness can assert ground truth
 	 * after a run without parsing the chat reply.
 	 */
-	dumpState(): { ok: true; lifts: Record<string, number>; sessions: number; activeLoggedSets: number } {
+	dumpState(): { ok: true; lifts: Record<string, number>; sessions: number; activeLoggedSets: number; restSeconds: number } {
 		const lifts: Record<string, number> = {};
 		for (const d of this.state.program.days) {
 			for (const l of d.lifts) {
@@ -789,6 +828,7 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 			lifts,
 			sessions: row?.n ?? 0,
 			activeLoggedSets: this.state.activeSession?.loggedSets.length ?? 0,
+			restSeconds: this.state.settings?.restSeconds ?? 60,
 		};
 	}
 
@@ -1113,7 +1153,12 @@ export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url);
 
-		if (url.pathname === "/" || url.pathname === "/plan") {
+		// Landing route (design-refresh): "/" is the entry page; "/plan" remains the reference view.
+		if (url.pathname === "/") {
+			return new Response(renderLanding(), { headers: { "content-type": "text/html; charset=utf-8" } });
+		}
+
+		if (url.pathname === "/plan") {
 			const me = await getAgentByName(env.LifttyAgent, "me");
 			const data = await me.getPlanData();
 			return new Response(renderPlan(data), {

@@ -25,6 +25,22 @@ describe("liftty worker (M0)", () => {
 	});
 });
 
+// design-refresh: the new landing route at "/" (shared header + wordmark + entry rows).
+describe("liftty landing (design-refresh)", () => {
+	it("serves the landing page at / with the wordmark and entry rows", async () => {
+		const response = await SELF.fetch("https://example.com/");
+		expect(response.status).toBe(200);
+		const html = await response.text();
+		expect(html).toContain('class="wordmark"');
+		expect(html).toContain("liftty");
+		// The four entry rows link into the app.
+		expect(html).toContain('href="/plan"');
+		expect(html).toContain('href="/session"');
+		expect(html).toContain('href="/chat"');
+		expect(html).toContain('href="/flow"');
+	});
+});
+
 // M4: the live workout session page renders and wires a raw WS to the agent.
 describe("liftty /session (M4)", () => {
 	it("serves the /session page with the live-session markup", async () => {
@@ -36,7 +52,26 @@ describe("liftty /session (M4)", () => {
 		// The page must open a raw WS to the agent and speak the log_set protocol.
 		expect(html).toContain("/agents/liftty-agent/me");
 		expect(html).toContain("log_set");
-		expect(html).toContain("Receipts");
+		expect(html).toContain("receipts");
+		// design-refresh: the configurable rest timer — editable chip + the set_rest frame it sends.
+		expect(html).toContain("set_rest");
+		expect(html).toContain('id="restchip"');
+	});
+});
+
+// design-refresh: the configurable rest timer is a real, persisted setting on the agent.
+describe("liftty rest config (design-refresh)", () => {
+	it("defaults to 60s and setRestSeconds persists a clamped value", async () => {
+		const a = await agent("rest-config");
+		// Fresh DO seeds the 60s default.
+		expect((await a.dumpState()).restSeconds).toBe(60);
+		// Setting it clamps to 5–600 and persists.
+		expect((await a.setRestSeconds({ seconds: 90 })).restSeconds).toBe(90);
+		expect((await a.setRestSeconds({ seconds: 5000 })).restSeconds).toBe(600);
+		expect((await a.setRestSeconds({ seconds: 1 })).restSeconds).toBe(5);
+		// A fresh handle to the same DO reads the persisted value from durable state.
+		const b = await agent("rest-config");
+		expect((await b.dumpState()).restSeconds).toBe(5);
 	});
 });
 

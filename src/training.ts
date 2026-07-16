@@ -50,6 +50,8 @@ export interface Training {
 	getHistory(exercise?: string, limit?: number): SessionLog[];
 	logSet(set: SetInput): { activeSets: number; message: string };
 	adjustProgram(change: ProgramChange): AdjustResult;
+	/** Set the default rest timer (seconds) between logged sets — persists; drives the next rest_started. */
+	setRestSeconds(input: { seconds: number }): { restSeconds: number };
 }
 
 /** M5: plugin authoring surface. Kept separate from Training so the four-method centerpiece stays clean. */
@@ -166,6 +168,17 @@ export function buildTrainingTools(t: Training & PluginAuthoring, opts?: { decoy
 						throw new Error(`unknown op: ${(c as { op: string }).op}`);
 				}
 			},
+		}),
+		setRestSeconds: tool({
+			description:
+				"Set the lifter's default rest timer (seconds) between logged sets. Persists in state and drives the rest countdown after every future set unless a set overrides it. Use when the lifter asks (e.g. 'rest 90 seconds'). Range 5–600.",
+			inputSchema: jsonSchema<{ seconds: number }>({
+				type: "object",
+				properties: { seconds: { type: "integer", minimum: 5, maximum: 600 } },
+				required: ["seconds"],
+				additionalProperties: false,
+			}),
+			execute: async ({ seconds }) => t.setRestSeconds({ seconds }),
 		}),
 		// --- M5: plugin authoring. These flow into Code Mode automatically (buildCodeModeTool wraps
 		// this same object), so the coach can compile a stated policy into persistent code from a

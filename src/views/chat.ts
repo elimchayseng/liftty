@@ -1,68 +1,59 @@
+import { renderHead, renderHeader } from "./shared";
+
 /**
- * Server-rendered /chat — a minimal coach chat client so M2 is testable in a browser.
- * One input, a running transcript, and a badge showing which typed tools each turn used.
- * No framework: inline JS POSTs to the same agent endpoint the API uses.
+ * Server-rendered /chat — the coach chat client (design-refresh reskin).
+ *
+ * Behavior unchanged: one input, a running transcript, a badge of which typed tools each turn used,
+ * and the real per-turn token cost. The POST body still carries `mode: 'codemode' | 'tools'` — only
+ * the toggle LABELS change (codemode / tool call). Messages are square hairline boxes, not bubbles;
+ * the user turn is marked by an orange left-tick instead of a blue fill.
  */
 export function renderChat(): string {
-	return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>liftty · chat</title>
-<style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
+	const css = `
   html, body { height: 100%; }
-  body {
-    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: #0b0d10; color: #e8eaed;
-    display: flex; flex-direction: column;
-    max-width: 640px; margin: 0 auto;
-    padding: max(12px, env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom));
-  }
-  header { display: flex; align-items: baseline; gap: 10px; padding: 4px 4px 12px; }
-  header h1 { font-size: 22px; font-weight: 800; letter-spacing: -0.02em; }
-  header .dot { color: #f6821f; }
-  header a { margin-left: auto; color: #9aa0a6; font-size: 14px; text-decoration: none; }
-  #log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding: 4px; }
-  .msg { max-width: 88%; padding: 10px 14px; border-radius: 14px; white-space: pre-wrap; word-wrap: break-word; }
-  .me { align-self: flex-end; background: #1f6feb; color: #fff; border-bottom-right-radius: 4px; }
-  .coach { align-self: flex-start; background: #14171c; border: 1px solid #232830; border-bottom-left-radius: 4px; }
-  .tools { align-self: flex-start; font-size: 11px; color: #9aa0a6; margin-top: -6px; padding-left: 6px; }
-  .tools b { color: #f6821f; font-weight: 600; }
-  .code { align-self: flex-start; max-width: 88%; margin-top: -4px; background: #0e1116; border: 1px solid #232830; border-left: 2px solid #f6821f; border-radius: 8px; padding: 10px 12px; overflow-x: auto; }
-  .code .cap { color: #6b7280; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; display: block; margin-bottom: 6px; }
-  .code pre { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: #cbd2d9; white-space: pre; }
-  .err { align-self: flex-start; color: #ff6b6b; font-size: 13px; }
-  .seg { margin-left: auto; display: flex; border: 1px solid #232830; border-radius: 8px; overflow: hidden; }
-  .seg button { background: #14171c; color: #9aa0a6; border: none; border-radius: 0; padding: 5px 10px; font-size: 12px; font-weight: 600; }
-  .seg button.on { background: #f6821f; color: #0b0d10; }
-  form { display: flex; gap: 8px; padding-top: 10px; }
-  input { flex: 1; background: #14171c; border: 1px solid #232830; border-radius: 10px; padding: 12px 14px; color: #e8eaed; font-size: 16px; }
-  input:focus { outline: none; border-color: #f6821f; }
-  button { background: #f6821f; color: #0b0d10; border: none; border-radius: 10px; padding: 0 18px; font-weight: 700; font-size: 15px; }
-  button:disabled { opacity: 0.5; }
-  .hint { color: #6b7280; font-size: 12px; padding: 6px 4px 0; }
-</style>
-</head>
+  body { display: flex; flex-direction: column; }
+  .seg { display: flex; border: 1px solid var(--line-strong); font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .seg button { background: transparent; color: var(--faint); border: none; padding: 6px 10px; font: inherit; cursor: pointer; }
+  .seg button.on { background: var(--marker); color: var(--bg); font-weight: 600; }
+
+  .chat { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 20px; padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
+  #log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+  .msg { max-width: 88%; padding: 12px 14px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; }
+  .coach { align-self: flex-start; border: 1px solid var(--line); color: #e8e7e0; }
+  .me { align-self: flex-end; max-width: 85%; border-left: 2px solid var(--accent); background: rgba(255,255,255,0.03); color: var(--ink); }
+  .tools { align-self: flex-start; font-family: var(--mono); font-size: 11px; color: var(--faint); }
+  .tools b { color: var(--accent); font-weight: 500; }
+  .code { align-self: flex-start; max-width: 88%; border: 1px solid var(--line); border-left: 2px solid var(--accent); padding: 10px 12px; overflow-x: auto; }
+  .code .cap { display: block; font-family: var(--mono); font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--faint); margin-bottom: 7px; }
+  .code pre { font-family: var(--mono); font-size: 11px; color: #cbd2d9; line-height: 1.5; white-space: pre; }
+  .err { align-self: flex-start; font-family: var(--mono); color: #ff6b6b; font-size: 13px; }
+
+  form { display: flex; gap: 8px; padding-top: 16px; }
+  input { flex: 1; background: transparent; border: 1px solid var(--line-strong); padding: 13px 14px; color: var(--ink); font-family: var(--mono); font-size: 14px; }
+  input::placeholder { color: var(--faint); }
+  input:focus { outline: none; border-color: var(--accent); }
+  button.send { padding: 0 20px; font-size: 14px; }
+  button.send:disabled { opacity: 0.5; }
+  .hint { font-family: var(--mono); color: var(--faint); font-size: 11px; padding: 8px 2px 0; }`;
+
+	const toggle = `<div class="seg" id="seg" title="Code Mode: one snippet vs. Tools: one call at a time">
+      <button id="cm" class="on" type="button">codemode</button>
+      <button id="tm" type="button">tool call</button>
+    </div>`;
+
+	return `${renderHead("chat", css)}
 <body>
-  <header>
-    <h1>liftty<span class="dot">.</span> chat</h1>
-    <div class="seg" id="seg" title="Code Mode: one snippet vs. Tools: one call at a time">
-      <button id="cm" class="on" type="button">Code Mode</button>
-      <button id="tm" type="button">Tools</button>
+  ${renderHeader("chat", toggle)}
+  <div class="chat">
+    <div id="log">
+      <div class="msg coach">Ask about your program or history — try "how's my <span class="hl">front squat</span> trending?" or "log my squats: 5x225, 5x225, 8x225 — did I PR? bump next week's front squat 5lb if so."</div>
     </div>
-    <a href="/plan" style="margin-left:10px">plan →</a>
-  </header>
-  <div id="log">
-    <div class="msg coach">Coach here. Ask about your program or history — try "how's my front squat trending?" or "log my squats: 5x225, 5x225, 8x225 — did I PR? bump next week's front squat 5lb if so."</div>
+    <form id="f">
+      <input id="m" autocomplete="off" placeholder="message the coach" autofocus />
+      <button class="cta send" id="b" type="submit">SEND</button>
+    </form>
+    <div class="hint" id="hint">Code Mode (M3): the coach writes one JS snippet against <code>training.*</code>, run in a sandbox. Toggle to Tools to see the M2 baseline — same typed API, called one at a time.</div>
   </div>
-  <form id="f">
-    <input id="m" autocomplete="off" placeholder="Message the coach…" autofocus />
-    <button id="b" type="submit">Send</button>
-  </form>
-  <div class="hint" id="hint">Code Mode (M3): the coach writes one JS snippet against <code>training.*</code>, run in a sandbox. Toggle to Tools to see the M2 baseline — same typed API, called one at a time.</div>
 
 <script>
   const log = document.getElementById('log');
@@ -90,7 +81,7 @@ export function renderChat(): string {
 
   function add(cls, text) {
     const d = document.createElement('div');
-    d.className = 'msg ' + cls;
+    d.className = (cls === 'err' ? 'err' : 'msg ' + cls);
     d.textContent = text;
     log.appendChild(d);
     log.scrollTop = log.scrollHeight;
