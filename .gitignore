@@ -172,3 +172,6 @@ code-mode-comparison.html
 # Token-optimization harness output (measurements, optimizer traces)
 results/
 .gstack/
+
+# macOS
+.DS_Store
