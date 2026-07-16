@@ -395,6 +395,30 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 						}
 				break;
 			}
+			case "setExerciseScheme": {
+				// Change the sets×reps prescription for matching lifts. Bounds clamped here (the one
+				// validated write path) exactly like weight: sets 1–20, reps 1–100. `sets`/`reps` are
+				// each optional — only the provided field changes; a lift is only "changed" if a value
+				// actually moved.
+				const q = change.exercise.toLowerCase();
+				const clampSets = change.sets != null ? Math.min(20, Math.max(1, Math.round(change.sets))) : null;
+				const clampReps = change.reps != null ? Math.min(100, Math.max(1, Math.round(change.reps))) : null;
+				for (const d of program.days)
+					for (const l of d.lifts)
+						if (l.exercise.toLowerCase().includes(q)) {
+							let touched = false;
+							if (clampSets != null && l.sets !== clampSets) {
+								l.sets = clampSets;
+								touched = true;
+							}
+							if (clampReps != null && l.reps !== clampReps) {
+								l.reps = clampReps;
+								touched = true;
+							}
+							if (touched) changed.push(l.exercise);
+						}
+				break;
+			}
 			case "advanceWeek":
 				program.weekIndex += 1;
 				break;
