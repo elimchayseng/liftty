@@ -358,3 +358,45 @@ describe("liftty /db explorer + demo reset (FLOW-LIVE-EVENTS)", () => {
 		expect((await SELF.fetch("https://example.com/reset-demo?key=" + KEY)).status).toBe(405);
 	});
 });
+
+describe("liftty coach token usage (REAL-TOKEN-USAGE)", () => {
+	// recordCoachUsage() is the seam the /chat handler calls with the AI SDK's result.totalUsage — the
+	// real token counts AI Gateway can't surface for these streamed responses. We exercise it directly
+	// (no live model call) and assert it persists to model_usage AND emits a coach_usage event.
+	it("persists a coach turn to model_usage and emits a coach_usage backfill event", async () => {
+		const a = await agent("coach-usage");
+		await a.reseed();
+		a.recordCoachUsage({ mode: "tools", inputTokens: 6510, outputTokens: 467, steps: 2, authoredPlugin: null });
+
+		const snap = await a.getDbSnapshot();
+		const mu = snap.tables.find((t: { name: string }) => t.name === "model_usage");
+		expect(mu).toBeTruthy();
+		expect(mu.rowCount).toBe(1);
+		expect(mu.columns).toContain("total_tokens");
+		expect(mu.rows[0].total_tokens).toBe(6977);
+		expect(mu.rows[0].input_tokens).toBe(6510);
+		expect(mu.rows[0].mode).toBe("tools");
+
+		// The same turn is emitted as a coach_usage event so a reconnecting /flow client backfills a real
+		// per-re-derivation token figure for the ledger.
+		const pe = snap.tables.find((t: { name: string }) => t.name === "plugin_events");
+		const coach = (pe.rows as Array<{ payload: string }>)
+			.map((r) => JSON.parse(r.payload))
+			.filter((p: { type: string }) => p.type === "coach_usage");
+		expect(coach.length).toBe(1);
+		expect(coach[0].totalTokens).toBe(6977);
+	});
+
+	it("prunes model_usage to <= 50 rows and records the authored plugin name", async () => {
+		const a = await agent("coach-usage-prune");
+		await a.reseed();
+		for (let i = 0; i < 55; i++) {
+			a.recordCoachUsage({ mode: "codemode", inputTokens: 100 + i, outputTokens: 10, steps: 1, authoredPlugin: i === 54 ? "auto-regulate" : null });
+		}
+		const snap = await a.getDbSnapshot();
+		const mu = snap.tables.find((t: { name: string }) => t.name === "model_usage");
+		expect(mu.rowCount).toBe(50);
+		// newest-first: the most recent row carries the authored plugin name
+		expect(mu.rows[0].authored_plugin).toBe("auto-regulate");
+	});
+});
