@@ -40,6 +40,104 @@ describe("liftty /session (M4)", () => {
 	});
 });
 
+// FLOW-LIVE-EVENTS: /flow page, plugin_events persistence, and the onConnect backfill.
+const AUTO_REGULATE_SRC = `export default {
+	onSetLogged(event) {
+		if (event.failed && event.set.exercise.toLowerCase().includes("front squat")) {
+			return { actions: [{ op: "setExerciseWeight", exercise: "Front Squat", weight: 100 }], note: "cut after miss" };
+		}
+		return { actions: [] };
+	}
+}`;
+
+// Open a raw WS to a named DO (same route /session + /flow use), collect the plugin_events_backfill.
+async function collectBackfill(name: string): Promise<{ events: Array<Record<string, unknown>>; modules: Array<Record<string, unknown>> }> {
+	const resp = await SELF.fetch(`https://example.com/agents/liftty-agent/${name}`, { headers: { Upgrade: "websocket" } });
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	const ws = (resp as any).webSocket as WebSocket | null;
+	if (!ws) throw new Error("no webSocket on upgrade response");
+	ws.accept();
+	return await new Promise((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error("no backfill received")), 5000);
+		ws.addEventListener("message", (e: MessageEvent) => {
+			let msg: { type?: string };
+			try {
+				msg = JSON.parse(typeof e.data === "string" ? e.data : "");
+			} catch {
+				return;
+			}
+			if (msg && msg.type === "plugin_events_backfill") {
+				clearTimeout(timer);
+				resolve(msg as never);
+				try {
+					ws.close();
+				} catch {
+					/* ignore */
+				}
+			}
+		});
+	});
+}
+
+describe("liftty /flow live events (FLOW-LIVE-EVENTS)", () => {
+	it("serves the /flow page as text/html", async () => {
+		const response = await SELF.fetch("https://example.com/flow");
+		expect(response.status).toBe(200);
+		expect(response.headers.get("content-type")).toContain("text/html");
+	});
+
+	it("records plugin_created + plugin_fired to the event buffer", async () => {
+		const a = await agent("flow-events");
+		await a.reseed();
+		await a.createPlugin({ name: "auto-regulate", source: AUTO_REGULATE_SRC });
+		await a.logSet({ exercise: "Front Squat", reps: 5, weight: 125 });
+		await a.firePlugins({ set: { exercise: "Front Squat", reps: 5, weight: 125 }, failed: true });
+
+		const snap = await a.getDbSnapshot();
+		const evTable = snap.tables.find((t: { name: string }) => t.name === "plugin_events");
+		const types = evTable.rows.map((r: { type: string }) => r.type);
+		expect(types).toContain("plugin_created");
+		expect(types).toContain("plugin_fired");
+	});
+
+	it("prunes the event buffer to <= 50 rows", async () => {
+		const a = await agent("flow-prune");
+		await a.reseed();
+		await a.createPlugin({ name: "noop", source: `export default { onSetLogged() { return { actions: [] }; } }` });
+		// 60 fires → 60 plugin_fired + 1 plugin_created = 61 events, pruned to newest 50.
+		for (let i = 0; i < 60; i++) {
+			await a.firePlugins({ set: { exercise: "Front Squat", reps: 5, weight: 125 }, failed: false });
+		}
+		const snap = await a.getDbSnapshot();
+		const evTable = snap.tables.find((t: { name: string }) => t.name === "plugin_events");
+		expect(evTable.rowCount).toBeLessThanOrEqual(50);
+	});
+
+	it("backfills the newest events + module registry on connect (oldest-first)", async () => {
+		const a = await agent("flow-backfill");
+		await a.reseed();
+		await a.createPlugin({ name: "auto-regulate", source: AUTO_REGULATE_SRC });
+		await a.logSet({ exercise: "Front Squat", reps: 5, weight: 125 });
+		await a.firePlugins({ set: { exercise: "Front Squat", reps: 5, weight: 125 }, failed: true });
+
+		const backfill = await collectBackfill("flow-backfill");
+		expect(Array.isArray(backfill.events)).toBe(true);
+		const evTypes = backfill.events.map((e) => e.type);
+		expect(evTypes).toContain("plugin_created");
+		expect(evTypes).toContain("plugin_fired");
+		// A plugin_fired carries the pinned contract fields.
+		const fired = backfill.events.find((e) => e.type === "plugin_fired") as Record<string, unknown>;
+		expect(fired).toBeTruthy();
+		expect(typeof fired.ms).toBe("number");
+		expect(typeof fired.version).toBe("number");
+		expect(typeof fired.setNumber).toBe("number");
+		expect(typeof fired.at).toBe("string");
+		expect(typeof fired.actionsApplied).toBe("number");
+		// Module registry present.
+		expect(backfill.modules.some((m) => m.name === "auto-regulate")).toBe(true);
+	});
+});
+
 // M5: Liftty Plugins — persistent, model-authored code executed via the raw Worker Loader.
 // Each test uses a distinct DO name so its plugins/state don't leak into the others.
 describe("liftty plugins (M5)", () => {
@@ -168,5 +266,95 @@ describe("liftty plugins (M5)", () => {
 		expect(weightOf("Hang Clean")).toBe(90);
 		// …the 4th whitelisted op (Barbell Row) is beyond the cap → untouched (seed 95).
 		expect(weightOf("Barbell Row")).toBe(95);
+	});
+});
+
+// FLOW-LIVE-EVENTS: /db read-only explorer + repeatable demo reset. DB_KEY comes from the vitest
+// miniflare binding (vitest.config.mts), not a committed wrangler var — keep this constant in sync.
+describe("liftty /db explorer + demo reset (FLOW-LIVE-EVENTS)", () => {
+	const KEY = "test-db-key";
+
+	it("gates /db on the key (404 without / wrong, 200 with)", async () => {
+		expect((await SELF.fetch("https://example.com/db")).status).toBe(404);
+		expect((await SELF.fetch("https://example.com/db?key=wrong")).status).toBe(404);
+		const ok = await SELF.fetch("https://example.com/db?key=" + KEY);
+		expect(ok.status).toBe(200);
+		expect(ok.headers.get("content-type")).toContain("text/html");
+	});
+
+	it("serves a shaped read-only snapshot at /db.json (404 without key)", async () => {
+		expect((await SELF.fetch("https://example.com/db.json")).status).toBe(404);
+		const res = await SELF.fetch("https://example.com/db.json?key=" + KEY);
+		expect(res.status).toBe(200);
+		const snap = (await res.json()) as { generatedAt: string; tables: Array<{ name: string; rowCount: number; columns: string[] }> };
+		expect(typeof snap.generatedAt).toBe("string");
+		expect(Array.isArray(snap.tables)).toBe(true);
+		expect(snap.tables.some((t) => t.name === "plugins")).toBe(true);
+		expect(snap.tables.some((t) => t.name === "sessions")).toBe(true);
+	});
+
+	it("runReadOnlyQuery allows SELECT/PRAGMA and rejects writes + multi-statement", async () => {
+		const a = await agent("db-query");
+		await a.reseed();
+		const ok = await a.runReadOnlyQuery("SELECT COUNT(*) AS n FROM sessions");
+		expect(ok.error).toBeUndefined();
+		expect(ok.rows.length).toBe(1);
+		expect((await a.runReadOnlyQuery("INSERT INTO sessions (id,date,status) VALUES ('x','y','z')")).error).toBeTruthy();
+		expect((await a.runReadOnlyQuery("SELECT 1; SELECT 2")).error).toBeTruthy();
+		// A single trailing semicolon is allowed.
+		expect((await a.runReadOnlyQuery("SELECT 1 AS one;")).error).toBeUndefined();
+	});
+
+	it("resetDemo (pre-demo) is idempotent and reports a clean slate", async () => {
+		const a = await agent("reset-idem");
+		await a.createPlugin({ name: "auto-regulate", source: AUTO_REGULATE_SRC });
+		const r1 = await a.resetDemo({ profile: "pre-demo" });
+		const r2 = await a.resetDemo({ profile: "pre-demo" });
+		expect(r1.ok).toBe(true);
+		expect(r1.modules).toBe(0);
+		expect(r1.events).toBe(0);
+		expect(r2).toEqual(r1); // twice → identical assertion report
+	});
+
+	it("post-author reset installs exactly one enabled module", async () => {
+		const a = await agent("reset-author");
+		const r = await a.resetDemo({ profile: "post-author" });
+		expect(r.ok).toBe(true);
+		expect(r.modules).toBe(1);
+		const list = await a.listPlugins();
+		expect(list.length).toBe(1);
+		expect(list[0].name).toBe("auto-regulate");
+		expect(list[0].enabled).toBe(true);
+	});
+
+	it("backs up before wipe and restoreBackup round-trips", async () => {
+		const a = await agent("reset-backup");
+		await a.reseed();
+		await a.createPlugin({ name: "auto-regulate", source: AUTO_REGULATE_SRC });
+		expect((await a.listPlugins()).length).toBe(1);
+
+		await a.resetDemo({ profile: "pre-demo" });
+		expect((await a.listPlugins()).length).toBe(0); // wiped
+
+		const backups = await a.listBackups();
+		expect(backups.length).toBeGreaterThanOrEqual(1); // backup written BEFORE the wipe
+
+		const restored = await a.restoreBackup(backups[0].id);
+		expect(restored.ok).toBe(true);
+		expect((await a.listPlugins()).some((p: { name: string }) => p.name === "auto-regulate")).toBe(true);
+	});
+
+	it("cancels armed restOver schedules on reset (no stale timer mid-demo)", async () => {
+		const a = await agent("reset-sched");
+		await a.reseed();
+		await a.schedule(600, "restOver", { exercise: "Front Squat" });
+		expect((await a.listSchedules()).length).toBeGreaterThanOrEqual(1);
+		await a.resetDemo({ profile: "pre-demo" });
+		expect((await a.listSchedules()).length).toBe(0);
+	});
+
+	it("gates /reset-demo on the key + method", async () => {
+		expect((await SELF.fetch("https://example.com/reset-demo", { method: "POST" })).status).toBe(404);
+		expect((await SELF.fetch("https://example.com/reset-demo?key=" + KEY)).status).toBe(405);
 	});
 });

@@ -1,0 +1,19 @@
+# Copy to .dev.vars (gitignored) and fill in real values for local `wrangler dev`.
+# In production, set each of these as a secret: `wrangler secret put <NAME>`.
+
+# Required: Heroku Managed Inference key for the coach model.
+HEROKU_INFERENCE_KEY=""
+
+# Optional: only if Authenticated AI Gateway is enabled.
+AIG_TOKEN=""
+
+# Optional: enables the /reseed admin route (repeatable demos / token study).
+RESEED_TOKEN=""
+
+# Optional: Cloudflare API token, if a script needs one.
+CF_API_TOKEN=""
+
+# FLOW-LIVE-EVENTS: gates /db, /db.json, and /reset-demo. These endpoints dump user data,
+# so the key is a secret — NOT a committed wrangler var. Unset = the endpoints 404 (fail-closed).
+# Pick any hard-to-guess string for local dev; use `wrangler secret put DB_KEY` in prod.
+DB_KEY=""

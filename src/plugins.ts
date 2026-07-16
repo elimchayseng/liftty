@@ -70,8 +70,12 @@ export type PluginSummary = {
 	last_result: string | null;
 };
 
-/** A receipt broadcast to /session per fired plugin: "auto-regulate fired · 4 ms · warm · 0 tokens". */
-export type PluginReceipt = { name: string; ms: number; cold: boolean; changed: string[]; error?: string };
+/**
+ * A receipt broadcast to /session + /flow per fired plugin: "auto-regulate fired · 4 ms · warm".
+ * `version` is the stored plugin row version (isolate cache key); `actionsApplied` is how many
+ * ProgramChanges actually applied through the validated path after sanitizing.
+ */
+export type PluginReceipt = { name: string; version: number; ms: number; cold: boolean; actionsApplied: number; changed: string[]; error?: string };
 
 /**
  * Minimal capability surface plugins.ts needs from the agent. Deliberately small: the DO's SQLite
@@ -209,7 +213,7 @@ function dryRunStub(loader: WorkerLoader, name: string, source: string): { getEn
  * bumping the version (which invalidates the isolate cache under the versioned id). Rejects on any
  * throw or bad shape, so a broken policy never reaches the hot path.
  */
-export async function createPlugin(host: PluginHost, input: { name: string; source: string }): Promise<{ id: string; name: string; version: number }> {
+export async function createPlugin(host: PluginHost, input: { name: string; source: string }): Promise<{ id: string; name: string; version: number; dryRunMs: number }> {
 	const name = (input?.name ?? "").trim();
 	const source = input?.source ?? "";
 	if (!name) throw new Error("createPlugin: name is required");
@@ -218,12 +222,16 @@ export async function createPlugin(host: PluginHost, input: { name: string; sour
 	// Author-time dry-run: a throwaway one-shot isolate to compile + shape-check before we store.
 	// `dryRunStub` prefers real `LOADER.load(code)` in prod and falls back to a unique-id `get()` in
 	// local miniflare (see its doc). Timeout-guarded so a hanging module is rejected at authoring, not
-	// stored to hang the hot path later.
+	// stored to hang the hot path later. Timed with Date.now() around the awaited RPC (real I/O, so the
+	// clock advances) to surface a truthful `dryRunMs` for the plugin_created event.
 	let result: PluginResult;
+	let dryRunMs = 0;
 	try {
 		const stub = dryRunStub(host.loader, name, source);
 		const ep = stub.getEntrypoint() as unknown as PluginEntrypoint;
+		const t0 = Date.now();
 		result = await callWithTimeout(ep, SYNTHETIC_EVENT);
+		dryRunMs = Date.now() - t0;
 	} catch (err) {
 		throw new Error(`createPlugin: dry-run failed — ${err instanceof Error ? err.message : String(err)}`);
 	}
@@ -237,10 +245,10 @@ export async function createPlugin(host: PluginHost, input: { name: string; sour
 	if (existing.length) {
 		const version = existing[0].version + 1; // version bump = deterministic cache invalidation
 		host.sql`UPDATE plugins SET name = ${name}, source = ${source}, version = ${version}, enabled = 1, last_run = NULL, last_result = NULL WHERE id = ${id}`;
-		return { id, name, version };
+		return { id, name, version, dryRunMs };
 	}
 	host.sql`INSERT INTO plugins (id, name, source, version, enabled, created_at) VALUES (${id}, ${name}, ${source}, 1, 1, ${now})`;
-	return { id, name, version: 1 };
+	return { id, name, version: 1, dryRunMs };
 }
 
 /**
@@ -287,7 +295,7 @@ export async function runPlugins(host: PluginHost, event: PluginEvent): Promise<
 
 		// One structured line per plugin execution → wrangler tail → RUNTIME-NOTES.md.
 		console.log(JSON.stringify({ plugin: row.id, ms, cold, actions: applied, ...(error ? { error } : {}) }));
-		receipts.push({ name: row.name, ms, cold, changed, ...(error ? { error } : {}) });
+		receipts.push({ name: row.name, version: row.version, ms, cold, actionsApplied: applied, changed, ...(error ? { error } : {}) });
 	}
 	return receipts;
 }

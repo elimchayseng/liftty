@@ -145,3 +145,51 @@ The same missing middle recurs across three buyer segments — the point is that
 - **Per-tenant SaaS business logic** *(enterprise)*. Dynamic Workflows' own named use case: a SaaS platform letting each tenant define automation logic authored at runtime and executed durably on the tenant's events. This is the enterprise face of the same gap — and, per §6, the one the runtime team is already shipping pieces for.
 
 Consumer, agent-infra, enterprise — one missing platform primitive underneath all three.
+
+---
+
+## 9. How this is NOT a rebuild of Durable Object Facets
+
+The sharpest objection a runtime eng lead can raise is: *"Cloudflare already shipped this — Durable Object Facets, April 30. You rebuilt Facets."* The answer has to be airtight, because getting it wrong concedes the entire thesis (see §3b, §6). It is airtight, and here is why.
+
+### 9.1 Facets are a state primitive; this is a code lifecycle layer
+
+Facets give a Durable Object child sub-objects, each with isolated SQLite. They answer exactly one question: *where does dynamically-loaded code's state live* — without touching the parent DO's data. That is the **state plane** of dynamic code, and it is a real, useful primitive.
+
+They answer *none* of the questions this build exists to answer: no code registry, no versioning or rollback, no contract enforcement, no pre-execution validation, no per-module observability, no enable/disable, no failure isolation. Everything liftty's plugins system built *is* that missing list. Facets manage the **state plane**; plugins manage the **code plane**. They sit in different layers of the same stack — complementary, not competitive.
+
+### 9.2 The concrete lifecycle behaviors Facets do not have — with anchors
+
+Each of these is real code in this repo, not a slide. This is the code-plane machinery Facets leave entirely to you:
+
+- **A code registry / source of truth** — a `plugins` table in the DO's own embedded SQLite: `id, name, source, version, enabled, created_at, last_run, last_result` (`src/server.ts:538-547`). Facets give you sub-object storage; they do not give you a *registry of code units*.
+- **Versioning → deterministic cache invalidation** — every module runs under a versioned isolate id `plugin:${id}:v${version}` (`src/plugins.ts:274`); a version bump *is* the cache invalidation, by construction (`src/plugins.ts:246`). Facets have no notion of a code version at all.
+- **Author-time pre-execution validation** — before a module is ever stored, `createPlugin()` dry-runs the model's source in a throwaway one-shot `LOADER.load()` isolate against a synthetic event and rejects on any throw or bad return shape (`src/plugins.ts:216-237`, dry-run stub at `src/plugins.ts:197-206`). You cannot lint a cached LLM output; you *can* compile-and-shape-check code before it reaches the hot path. Facets validate nothing.
+- **A typed contract, enforced** — modules return `ProgramChange[]`, the existing discriminated union (`src/training.ts:38-42`), through an op whitelist `ALLOWED_OPS = {deload, setExerciseWeight}` (`src/plugins.ts:101`) capped at three actions per event (`MAX_ACTIONS_PER_EVENT`, `src/plugins.ts:100`). A buggy or hostile module can at worst *propose* whitelisted changes; it can never write state directly. Facets enforce no contract.
+- **Per-module observability / receipts** — `last_run` / `last_result` columns on the row plus a `PluginReceipt` (`{name, version, ms, cold, actionsApplied, changed, error?}`, `src/plugins.ts:78`) emitted per fire, surfaced as an on-screen receipt and a `wrangler tail` JSON line. Facets emit no per-code-unit telemetry.
+- **Failure isolation** — a throwing module is recorded and skipped inside `runPlugins()` (`src/plugins.ts:261-263`); `logSet` has already succeeded before the plugin runs, so a broken policy can never break the set. Facets give you isolated *state*, not isolated *failure of the code lifecycle*.
+- **Enable / disable** — the `enabled` column gates the hot-path `SELECT`; a module is switched off without deleting its history. Facets have no such switch.
+
+### 9.3 This build mechanically doesn't use Facets at all
+
+Not "chose a different design" — *doesn't touch them*. The modules are **pure functions**: data in (a logged-set event), proposed actions out (`ProgramChange[]`), no state of their own. The registry lives in the **parent DO's own SQLite**, not in any sub-object. There is nowhere in this build a Facet would attach, because nothing dynamically-loaded here holds durable state.
+
+That is also exactly where Facets *become* the right call. The moment a module needs its own durable state — a rolling counter, an accumulated model, a per-module scratch table — the correct design is to **adopt Facets for that state** rather than hand-roll it. That is the plan's stretch item, and it is the cleanest illustration of the layering: Facets are the answer to a question this build has deliberately not yet asked. Complementary, not competitive.
+
+### 9.4 The real overlap is with the blog post's recipe — and that's an asset
+
+The honest overlap is not with the Facets *feature*; it is with the **April 30, 2026 Facets blog post**, which opens with *"what if you want an AI to generate more persistent code?"* and answers with a hand-rolled recipe: store the source in DO storage under a generated id, replay it into `LOADER.get()`, `globalOutbound: null`. That is the plugins pattern — published, by Cloudflare, as a recipe.
+
+This is an asset, not an embarrassment. A first-party post publishing the pattern as a *hand-rolled recipe* is the strongest possible evidence that the pattern is real, wanted, and **not yet a product**. Citing it converts the anxious question *"did I just rebuild X?"* into the confident claim: **Cloudflare published the pattern; I built it end-to-end** — versioned, validated, observable, capability-restricted — *and the glue I had to write is the backlog for the product that should own the middle.*
+
+### 9.5 Honest weaknesses (about the demo, not the argument)
+
+Stated plainly so no one else has to find them:
+
+- **Until Phase 2 lands, every number is fabricated.** One *"is that real?"* in the room collapses credibility. The whole point of the live-events work is to make the receipt ms, cold/warm flag, and ledger *provably* real end-to-end — which is what §PR-TESTING's truthful-numbers gates exist to prove before the artifact is ever shown.
+- **The ledger constants are assumptions.** Tokens-per-re-derivation and $/M are estimates; either source the token figure from real usage or label it `est.` Do not present an assumption as a measurement.
+- **The persistence claim is invisible in client-state-only viz.** "It survives redeploy" is a strong beat that shows nothing unless it is demonstrable — the `plugin_events` backfill is precisely what makes the persistence visible in the room. Without it, the strongest structural argument is the one the audience can't see.
+
+### The one-liner for the room
+
+> **"Facets answer where dynamic code's *state* lives. Nothing yet answers where the dynamic code *itself* lives — versioned, validated, observable. I built that answer, and the fact that I had to is the product gap."**

@@ -1,0 +1,49 @@
+{
+	"phase": "Rebuild · reaccumulation (3-day A/B/C)",
+	"goal": "Rebuild to December working weights (FS 4×7 @155 · Incline 4×6 @115 · Hang Clean 5×4 @125), then progress toward 3RM goals: FS 225 · Incline 170 · Hang Clean 185.",
+	"weekIndex": 1,
+	"days": [
+		{
+			"day": "Day A",
+			"focus": "Front Squat",
+			"lifts": [
+				{ "exercise": "Front Squat", "sets": 4, "reps": 8, "weight": 125, "note": "reaccumulation opener · below Dec 145 · controlled depth, brace ankle" },
+				{ "exercise": "Pause Front Squat (2s)", "sets": 3, "reps": 5, "weight": 105 },
+				{ "exercise": "Romanian Deadlift", "sets": 4, "reps": 8, "weight": 115 },
+				{ "exercise": "Weighted Step-ups", "sets": 3, "reps": 8, "weight": 25, "perSide": true },
+				{ "exercise": "Pull-ups", "sets": 4, "reps": 6 },
+				{ "exercise": "Bulgarian Split Squats", "sets": 3, "reps": 8, "weight": 30, "perSide": true },
+				{ "exercise": "Standing Calf Raises", "sets": 4, "reps": 15, "weight": 45 },
+				{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+			]
+		},
+		{
+			"day": "Day B",
+			"focus": "Incline Bench",
+			"lifts": [
+				{ "exercise": "Incline Bench", "sets": 4, "reps": 8, "weight": 95, "note": "known weak point — reps clean, leave 2 in the tank" },
+				{ "exercise": "Close-Grip Incline Press", "sets": 3, "reps": 8, "weight": 75 },
+				{ "exercise": "Barbell Row", "sets": 4, "reps": 8, "weight": 95 },
+				{ "exercise": "Dips", "sets": 3, "reps": 10 },
+				{ "exercise": "Seated DB Press", "sets": 3, "reps": 10, "weight": 30, "note": "reduced load on return from layoff" },
+				{ "exercise": "Lateral Raises", "sets": 3, "reps": 12, "weight": 15 },
+				{ "exercise": "Face Pulls", "sets": 3, "reps": 15, "weight": 30 },
+				{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+			]
+		},
+		{
+			"day": "Day C",
+			"focus": "Hang Clean",
+			"lifts": [
+				{ "exercise": "Hang Clean", "sets": 5, "reps": 3, "weight": 105, "note": "technique priority · stop if ankle catch flares · clean pulls only if catch degrades" },
+				{ "exercise": "Hang Clean Pulls", "sets": 4, "reps": 3, "weight": 125 },
+				{ "exercise": "Front Squat (lighter)", "sets": 3, "reps": 6, "weight": 115 },
+				{ "exercise": "Pull-ups", "sets": 4, "reps": 6 },
+				{ "exercise": "Weighted Step-ups", "sets": 3, "reps": 8, "weight": 25, "perSide": true },
+				{ "exercise": "EZ Bar Curls", "sets": 3, "reps": 10, "weight": 45 },
+				{ "exercise": "Rope Pushdowns", "sets": 3, "reps": 10, "weight": 35 },
+				{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+			]
+		}
+	]
+}

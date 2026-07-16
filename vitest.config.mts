@@ -29,6 +29,10 @@ export default defineWorkersConfig({
 				// We isolate instead by giving each test its own DO name, so opt out of stacked storage.
 				isolatedStorage: false,
 				wrangler: { configPath: "./wrangler.jsonc" },
+				// DB_KEY is deliberately NOT a committed wrangler var (it gates data-dumping endpoints —
+				// see wrangler.jsonc). Inject a hermetic test value so the /db + /reset-demo key-gate
+				// tests run without a real secret; keep it in sync with `KEY` in test/index.spec.ts.
+				miniflare: { bindings: { DB_KEY: "test-db-key" } },
 			},
 		},
 	},
