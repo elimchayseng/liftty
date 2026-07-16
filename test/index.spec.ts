@@ -382,6 +382,9 @@ describe("liftty program scheme edits (coach sets/reps)", () => {
 		// re-applying the same clamped value is a no-op: nothing "changed"
 		const r2 = await a.adjustProgram({ op: "setExerciseScheme", exercise: "Pull-ups", sets: 20 });
 		expect(r2.changed).not.toContain("Pull-ups");
+	});
+});
+
 describe("liftty coach token usage (REAL-TOKEN-USAGE)", () => {
 	// recordCoachUsage() is the seam the /chat handler calls with the AI SDK's result.totalUsage — the
 	// real token counts AI Gateway can't surface for these streamed responses. We exercise it directly
