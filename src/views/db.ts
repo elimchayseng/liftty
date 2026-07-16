@@ -118,6 +118,8 @@ export function renderDb(): string {
     var plugins = (snap.tables.find(function (t) { return t.name === 'plugins'; }) || { rows: [], rowCount: 0 });
     var sessions = (snap.tables.find(function (t) { return t.name === 'sessions'; }) || { rowCount: 0 });
     var events = (snap.tables.find(function (t) { return t.name === 'plugin_events'; }) || { rowCount: 0 });
+    var usage = (snap.tables.find(function (t) { return t.name === 'model_usage'; }) || { rows: [], rowCount: 0 });
+    var lastTok = (usage.rows && usage.rows[0]) ? usage.rows[0].total_tokens : null;
     var mods = plugins.rows || [];
     var anyDisabled = false, anyError = false;
     var modHtml = mods.map(function (m) {
@@ -137,6 +139,7 @@ export function renderDb(): string {
       '<span class="stat">modules <b>' + (plugins.rowCount || 0) + '</b></span>' +
       '<span class="stat">sessions <b>' + (sessions.rowCount || 0) + '</b></span>' +
       '<span class="stat">events buffer <b>' + (events.rowCount || 0) + '</b></span>' +
+      '<span class="stat">last coach turn <b>' + (lastTok != null ? lastTok + ' tok' : '—') + '</b></span>' +
       '<span class="mods">' + modHtml + '</span>';
   }
 

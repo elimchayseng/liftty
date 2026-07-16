@@ -625,6 +625,32 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 		this.broadcast(JSON.stringify(payload));
 	}
 
+	/**
+	 * REAL-TOKEN-USAGE: persist + broadcast a coach turn's real token cost, read from the AI SDK's
+	 * `result.totalUsage` (NOT from AI Gateway, which logs 0 for these streamed responses — see the
+	 * model_usage table comment in onStart). Stored for /db, and emitted as a `coach_usage` event
+	 * (through recordEvent, so it lands in the backfill buffer) so a reconnecting /flow client can
+	 * source a REAL per-re-derivation token figure for the counterfactual ledger instead of the 1,850
+	 * placeholder. Public so tests can exercise it without a live model call.
+	 */
+	recordCoachUsage(u: { mode: string; inputTokens: number; outputTokens: number; steps: number; authoredPlugin: string | null }): void {
+		const at = new Date().toISOString();
+		const total = u.inputTokens + u.outputTokens;
+		this.sql`INSERT INTO model_usage (at, mode, input_tokens, output_tokens, total_tokens, steps, authored_plugin)
+			VALUES (${at}, ${u.mode}, ${u.inputTokens}, ${u.outputTokens}, ${total}, ${u.steps}, ${u.authoredPlugin})`;
+		this.sql`DELETE FROM model_usage WHERE id NOT IN (SELECT id FROM model_usage ORDER BY id DESC LIMIT 50)`;
+		this.recordEvent({
+			type: "coach_usage",
+			mode: u.mode,
+			inputTokens: u.inputTokens,
+			outputTokens: u.outputTokens,
+			totalTokens: total,
+			steps: u.steps,
+			...(u.authoredPlugin ? { authoredPlugin: u.authoredPlugin } : {}),
+			at,
+		});
+	}
+
 	/** Runs on every wake (idempotent). Create tables; seed state + history ONCE per SEED_VERSION. */
 	async onStart() {
 		this.sql`CREATE TABLE IF NOT EXISTS sessions (
@@ -666,6 +692,23 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			at TEXT NOT NULL,
 			payload TEXT NOT NULL
+		)`;
+
+		// REAL-TOKEN-USAGE: per-coach-turn token accounting. THE AI-GATEWAY-vs-AI-SDK GAP: AI Gateway
+		// logs 0 in / 0 out for these streamed Heroku (openai-compatible) responses — it captures
+		// `streamed_data: []` and never extracts the usage chunk — so the dashboard's Tokens/Cost are
+		// blank. The AI SDK, given `stream_options.include_usage: true` (set in model.ts), DOES parse
+		// the final usage chunk into `result.totalUsage`. So THIS table, populated from the SDK, is the
+		// only honest, showable source of real token counts (feeds /db + the /flow ledger). Newest 50.
+		this.sql`CREATE TABLE IF NOT EXISTS model_usage (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			at TEXT NOT NULL,
+			mode TEXT,
+			input_tokens INTEGER NOT NULL DEFAULT 0,
+			output_tokens INTEGER NOT NULL DEFAULT 0,
+			total_tokens INTEGER NOT NULL DEFAULT 0,
+			steps INTEGER,
+			authored_plugin TEXT
 		)`;
 
 		const [row] = this.sql<{ value: string }>`SELECT value FROM meta WHERE key = 'seed_version'`;
@@ -769,9 +812,9 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 				.toArray()
 				.map((r) => r.name);
 		} catch {
-			names = ["demo_backups", "meta", "plugin_events", "plugins", "sessions"];
+			names = ["demo_backups", "meta", "model_usage", "plugin_events", "plugins", "sessions"];
 		}
-		const detailed = new Set(["plugins", "sessions", "plugin_events"]);
+		const detailed = new Set(["plugins", "sessions", "plugin_events", "model_usage"]);
 		const tables: DbTable[] = [];
 		for (const name of names) {
 			let rowCount = 0;
@@ -791,6 +834,9 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 				order = "ORDER BY date DESC, id DESC";
 				limit = 20;
 			} else if (name === "plugin_events") {
+				order = "ORDER BY id DESC";
+				limit = 24;
+			} else if (name === "model_usage") {
 				order = "ORDER BY id DESC";
 				limit = 24;
 			} else if (name === "plugins") {
@@ -1020,6 +1066,16 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 				.filter((c) => c.toolName === "createPlugin")
 				.map((c) => c.input as { name?: string; source?: string })
 				.filter((p): p is { name: string; source: string } => typeof p?.name === "string" && typeof p?.source === "string");
+
+			// REAL-TOKEN-USAGE: record the real SDK-reported token cost of this coach turn (and note the
+			// plugin it authored, if any). This is what makes the /flow ledger and /db honestly sourced.
+			this.recordCoachUsage({
+				mode: flowMode,
+				inputTokens: usage.inputTokens ?? 0,
+				outputTokens: usage.outputTokens ?? 0,
+				steps: steps.length,
+				authoredPlugin: plugins.length ? plugins[0].name : null,
+			});
 
 			return Response.json({
 				reply: text,

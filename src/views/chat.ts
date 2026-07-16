@@ -104,6 +104,17 @@ export function renderChat(): string {
     log.appendChild(d);
     log.scrollTop = log.scrollHeight;
   }
+  // Real token cost of this coach turn, from the AI SDK (result.totalUsage). The AI Gateway dashboard
+  // shows 0 for these streamed Heroku responses; the SDK parses the include_usage chunk, so this is real.
+  function addUsage(inp, out) {
+    if (inp == null && out == null) return;
+    const total = (inp || 0) + (out || 0);
+    const d = document.createElement('div');
+    d.className = 'tools';
+    d.innerHTML = 'tokens: <b>' + (inp || 0) + '</b> in · <b>' + (out || 0) + '</b> out · <b>' + total + '</b> total';
+    log.appendChild(d);
+    log.scrollTop = log.scrollHeight;
+  }
   function addCode(snippets) {
     if (!snippets || !snippets.length) return;
     for (const src of snippets) {
@@ -160,6 +171,7 @@ export function renderChat(): string {
         addCode(data.code);
         addPlugins(data.plugins);
         addTools(data.toolsUsed);
+        addUsage(data.usageIn, data.usageOut);
       }
     } catch (err) {
       thinking.remove();
