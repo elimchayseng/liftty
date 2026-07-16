@@ -38,7 +38,7 @@ export type SetInput = { exercise: string; reps: number; weight?: number };
 export type ProgramChange =
 	| { op: "deload"; pct?: number }
 	| { op: "setExerciseWeight"; exercise: string; weight: number }
-	| { op: "setExerciseScheme"; exercise: string; sets?: number; reps?: number }
+	| { op: "setExerciseScheme"; exercise: string; sets?: number; reps?: number; exact?: boolean }
 	| { op: "advanceWeek" }
 	| { op: "setPhase"; phase: string; goal?: string };
 

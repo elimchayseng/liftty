@@ -129,6 +129,7 @@ export function renderSession(): string {
 
   var ws = null;
   var restTimer = null;
+  var restDoneTimer = null;
   var receiptCount = 0;
 
   // Session view state, so we can re-render prescriptions live when a policy edits the program.
@@ -137,11 +138,30 @@ export function renderSession(): string {
   var lastScheme = {};             // exercise -> last-seen "sets x reps" (scheme change detection + flash)
   var haveBaseline = false;        // suppress the flash on the very first render
   var progRefs = [];               // [{exercise, sets, el}] so set-progress updates without a full re-render
+  var latestState = null;          // newest full state broadcast (source for a deferred re-render)
+  var pendingRerender = false;     // a prescription change arrived while the lifter was mid-edit — flush on blur
+
+  // A full renderLifts() rebuilds every row (innerHTML), which would steal focus and wipe an in-progress
+  // value if it ran while the lifter is typing in a chip/field. True when the focus is inside a lift row.
+  function isEditingLifts() { return liftsEl.contains(document.activeElement); }
 
   function setConn(state) {
     conn.className = 'conn' + (state === 'open' ? ' on' : state === 'closed' ? ' off' : '');
     connlbl.textContent = state === 'open' ? 'live' : state === 'closed' ? 'disconnected' : 'connecting';
   }
+
+  // When focus leaves the lift area entirely, flush any re-render we deferred to protect an in-progress
+  // edit. The setTimeout(0) lets activeElement settle first, so tabbing between chips in the same area
+  // (still editing) keeps waiting rather than rebuilding under the lifter's fingers.
+  liftsEl.addEventListener('focusout', function () {
+    setTimeout(function () {
+      if (!pendingRerender || isEditingLifts()) return;
+      pendingRerender = false;
+      var lifts = latestState ? liftsFromState(latestState) : null;
+      if (lifts) renderLifts(lifts, latestState.activeSession);
+      updateProgress(latestState ? latestState.activeSession : null);
+    }, 0);
+  });
 
   // The editable rest-default chip persists via a set_rest frame; the next logged set rests this long.
   restChip.addEventListener('change', function () {
@@ -300,6 +320,7 @@ export function renderSession(): string {
 
   function startRest(seconds) {
     if (restTimer) clearInterval(restTimer);
+    if (restDoneTimer) { clearTimeout(restDoneTimer); restDoneTimer = null; }  // don't let a prior rest's reset hide this countdown
     var left = seconds;
     restEl.className = 'on';
     restLbl.textContent = 'rest';
@@ -316,7 +337,7 @@ export function renderSession(): string {
     restEl.className = 'on done';
     restLbl.textContent = 'rest over';
     restNum.textContent = 'go';
-    setTimeout(function () { restEl.className = ''; }, 4000);
+    restDoneTimer = setTimeout(function () { restEl.className = ''; restDoneTimer = null; }, 4000);
   }
 
   function send(obj) {
@@ -333,11 +354,17 @@ export function renderSession(): string {
         break;
       case 'cf_agent_state':
         if (msg.state) {
+          latestState = msg.state;
           if (msg.state.settings && msg.state.settings.restSeconds != null && document.activeElement !== restChip) {
             restChip.value = msg.state.settings.restSeconds;   // reflect coach-set default (chat path)
           }
           var lifts = liftsFromState(msg.state);
-          if (lifts && programChanged(lifts)) renderLifts(lifts, msg.state.activeSession);
+          if (lifts && programChanged(lifts)) {
+            // Defer the rebuild if the lifter is mid-edit in a row — flush it on focusout instead, so a
+            // committed sets edit (or a policy firing) never yanks focus or wipes a half-typed value.
+            if (isEditingLifts()) pendingRerender = true;
+            else renderLifts(lifts, msg.state.activeSession);
+          }
           updateProgress(msg.state.activeSession);   // always: cheap, never resets inputs
         }
         break;

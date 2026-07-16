@@ -412,11 +412,17 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 				// each optional — only the provided field changes; a lift is only "changed" if a value
 				// actually moved.
 				const q = change.exercise.toLowerCase();
-				const clampSets = change.sets != null ? Math.min(20, Math.max(1, Math.round(change.sets))) : null;
-				const clampReps = change.reps != null ? Math.min(100, Math.max(1, Math.round(change.reps))) : null;
+				// `exact` (used by the /session per-row chip) matches the one named lift; the default substring
+				// match (used by the coach tool) can touch several variants — e.g. "front squat" also hits
+				// "Pause Front Squat (2s)". The chip must not silently reprogram a sibling movement.
+				const matches = (name: string) => (change.exact ? name.toLowerCase() === q : name.toLowerCase().includes(q));
+				// Finite-guard the clamp: a non-finite input (NaN) would otherwise pass `l.sets !== clampSets`
+				// (NaN !== anything) and write NaN into the scheme. Skip the field instead.
+				const clampSets = change.sets != null && Number.isFinite(change.sets) ? Math.min(20, Math.max(1, Math.round(change.sets))) : null;
+				const clampReps = change.reps != null && Number.isFinite(change.reps) ? Math.min(100, Math.max(1, Math.round(change.reps))) : null;
 				for (const d of program.days)
 					for (const l of d.lifts)
-						if (l.exercise.toLowerCase().includes(q)) {
+						if (matches(l.exercise)) {
 							let touched = false;
 							if (clampSets != null && l.sets !== clampSets) {
 								l.sets = clampSets;
@@ -448,7 +454,10 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 	 * the coach can set it ("rest 90 seconds"); also called by the /session rest chip via a set_rest frame.
 	 */
 	setRestSeconds(input: { seconds: number }): { restSeconds: number } {
-		const restSeconds = Math.min(600, Math.max(5, Math.floor(input.seconds)));
+		// Coerce non-finite input (NaN/±Infinity from a Code Mode snippet or raw RPC) to the 60s default
+		// before clamping — otherwise NaN persists into state and poisons clampRest()/this.schedule().
+		const raw = Number.isFinite(input?.seconds) ? input.seconds : 60;
+		const restSeconds = Math.min(600, Math.max(5, Math.floor(raw)));
 		this.setState({ ...this.state, settings: { ...this.state.settings, restSeconds } });
 		return { restSeconds };
 	}
@@ -527,10 +536,15 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 			return;
 		}
 		// NEW: the /session sets×reps chips edit the day's prescription via the validated adjustProgram path.
+		// Guard here at the untrusted WS boundary: only forward FINITE numeric sets/reps, so a crafted
+		// frame ({sets:{}} / "5x" → NaN) can't reach the program and persist a NaN scheme to every client.
 		if (msg.type === "set_scheme") {
-			if (msg.exercise && (msg.sets != null || msg.reps != null)) {
+			const sets = Number.isFinite(msg.sets as number) ? (msg.sets as number) : undefined;
+			const reps = Number.isFinite(msg.reps as number) ? (msg.reps as number) : undefined;
+			if (typeof msg.exercise === "string" && (sets != null || reps != null)) {
 				try {
-					this.adjustProgram({ op: "setExerciseScheme", exercise: msg.exercise, sets: msg.sets, reps: msg.reps });
+					// exact:true — the chip edits exactly the row it belongs to, never a name-substring sibling.
+					this.adjustProgram({ op: "setExerciseScheme", exercise: msg.exercise, sets, reps, exact: true });
 				} catch (err) {
 					connection.send(JSON.stringify({ type: "error", message: err instanceof Error ? err.message : String(err) }));
 				}

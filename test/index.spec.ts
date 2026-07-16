@@ -407,6 +407,32 @@ describe("liftty program scheme edits (coach sets/reps)", () => {
 		expect(pull.reps).toBe(10);
 	});
 
+	// design-refresh: the /session chip path passes exact:true so editing one lift never rewrites a
+	// name-substring sibling ("Front Squat" must not touch "Pause Front Squat (2s)").
+	it("exact:true matches only the named lift, not substring siblings", async () => {
+		const a = await agent("scheme-exact");
+		await a.reseed(); // Day A has "Front Squat" (4×8) and "Pause Front Squat (2s)" (3×5)
+		const res = await a.adjustProgram({ op: "setExerciseScheme", exercise: "Front Squat", sets: 4, reps: 5, exact: true });
+		expect(res.changed).toContain("Front Squat");
+		expect(res.changed).not.toContain("Pause Front Squat (2s)");
+		const dayA = (await a.getProgram()).days[0].lifts;
+		const fs = dayA.find((l: { exercise: string }) => l.exercise === "Front Squat");
+		const pause = dayA.find((l: { exercise: string }) => l.exercise === "Pause Front Squat (2s)");
+		expect([fs.sets, fs.reps]).toEqual([4, 5]);
+		expect([pause.sets, pause.reps]).toEqual([3, 5]); // untouched
+	});
+
+	// design-refresh: a non-finite scheme value (crafted WS frame → NaN) is skipped, never written.
+	it("skips a non-finite sets/reps instead of persisting NaN", async () => {
+		const a = await agent("scheme-nan");
+		await a.reseed();
+		const res = await a.adjustProgram({ op: "setExerciseScheme", exercise: "Pull-ups", sets: NaN as unknown as number });
+		expect(res.changed).not.toContain("Pull-ups");
+		const pull = (await a.getProgram()).days.flatMap((d: { lifts: unknown[] }) => d.lifts).find((l: { exercise: string }) => l.exercise === "Pull-ups");
+		expect(Number.isFinite(pull.sets)).toBe(true);
+		expect(pull.sets).toBe(4); // pristine, unchanged
+	});
+
 	it("clamps out-of-range values and reports no change when already at target", async () => {
 		const a = await agent("scheme-clamp");
 		await a.reseed();
