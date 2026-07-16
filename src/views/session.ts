@@ -15,8 +15,11 @@
  *                     { type:"plugin_fired", name, ms, cold, changed }   (M5 receipt)
  *                     { type:"error", message }
  *
- * The receipts strip renders plugin_fired as "auto-regulate fired · 4 ms · 0 tokens" — the thesis
- * in one UI element: a persistent, model-authored policy running on a WS event with no inference.
+ * FLOW-LIVE-EVENTS redesign: the prescribed-lift rows now re-render on every `cf_agent_state`, so a
+ * policy that adjusts a weight (setExerciseWeight / deload) is VISIBLE — the number changes live and
+ * the row flashes. Weight is the primary value in the layout (prescribed, worked, and any policy
+ * delta), and each lift shows logged-vs-target set progress. The receipts strip still proves the
+ * thesis: a persistent, model-authored policy running on a WS event with no inference.
  */
 export function renderSession(): string {
 	return `<!doctype html>
@@ -52,24 +55,43 @@ export function renderSession(): string {
   #rest.done { background: #0e1f12; border-color: #2e5a37; color: #a8f0bb; }
   #rest .num { font-variant-numeric: tabular-nums; font-size: 20px; font-weight: 800; color: #f6b545; }
   #rest.done .num { color: #3fb950; }
-  .lift { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; align-items: center; padding: 12px 0; border-top: 1px solid #232830; }
+
+  /* --- lift row: weight-forward layout --- */
+  .lift { display: grid; grid-template-columns: 1fr auto; column-gap: 12px; row-gap: 2px; align-items: center; padding: 12px 2px; border-top: 1px solid #232830; border-radius: 10px; }
   .lift:first-of-type { border-top: none; }
-  .lift .name { font-weight: 600; }
+  .lift .name { grid-column: 1; font-weight: 600; }
   .lift .rx { grid-column: 1; color: #9aa0a6; font-size: 12px; font-variant-numeric: tabular-nums; }
-  .lift .ctl { grid-column: 2; grid-row: 1 / span 2; display: flex; align-items: center; gap: 6px; }
+  .lift .rx .wt { color: #f6c177; font-weight: 700; font-size: 13px; }
+  .lift .rx .delta { color: #3fb950; font-weight: 700; margin-left: 6px; }
+  .lift .prog { grid-column: 1; font-size: 11px; color: #6b7280; font-variant-numeric: tabular-nums; }
+  .lift .prog.met { color: #3fb950; }
+  .lift .ctl { grid-column: 2; grid-row: 1 / span 3; display: flex; align-items: center; gap: 6px; }
   .lift input { width: 52px; background: #0e1116; border: 1px solid #232830; border-radius: 8px; padding: 8px; color: #e8eaed; font-size: 15px; text-align: center; font-variant-numeric: tabular-nums; }
+  .lift input.wt { border-color: #3a2f18; color: #f6c177; font-weight: 700; }
   .lift input:focus { outline: none; border-color: #f6821f; }
   .lift .x { color: #6b7280; font-size: 12px; }
   .lift button { background: #f6821f; color: #0b0d10; border: none; border-radius: 8px; padding: 8px 12px; font-weight: 700; font-size: 13px; }
   .lift button.fail { background: #14171c; color: #ff8f8f; border: 1px solid #3a2226; padding: 8px 10px; }
   .lift button.fail.on { background: #ff6b6b; color: #0b0d10; border-color: #ff6b6b; }
   .lift button:disabled { opacity: 0.5; }
+  /* policy adjusted a weight on this row */
+  .lift.changed { animation: pf_flash 1.6s ease; }
+  @keyframes pf_flash {
+    0% { background: #241a2f; box-shadow: inset 0 0 0 1px #7c5cff88; }
+    100% { background: transparent; box-shadow: inset 0 0 0 1px transparent; }
+  }
+
   .card { background: #14171c; border: 1px solid #232830; border-radius: 14px; padding: 14px 16px; margin-bottom: 14px; }
   .card.today { border-color: #f6821f; box-shadow: 0 0 0 1px #f6821f33; }
   h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: #9aa0a6; margin: 10px 0 10px; }
-  #logged .row { display: flex; justify-content: space-between; font-size: 14px; padding: 8px 0; border-top: 1px solid #232830; }
+  #logged .row { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 10px; font-size: 14px; padding: 8px 0; border-top: 1px solid #232830; }
   #logged .row:first-child { border-top: none; }
-  #logged .row b { color: #fff; }
+  #logged .row .lbl { color: #cbd2d9; }
+  #logged .row .lbl .n { color: #6b7280; font-variant-numeric: tabular-nums; }
+  #logged .row .val { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #logged .row .val .reps { color: #9aa0a6; }
+  #logged .row .val b { color: #fff; }
+  #logged .row .val .lb { color: #6b7280; font-weight: 400; font-size: 12px; }
   .muted { color: #9aa0a6; font-size: 14px; }
   #receipts { display: flex; flex-direction: column; gap: 6px; }
   .receipt { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: #cbd2d9; background: #0e1116; border: 1px solid #232830; border-left: 2px solid #3fb950; border-radius: 8px; padding: 8px 10px; }
@@ -125,20 +147,56 @@ export function renderSession(): string {
   var restTimer = null;
   var receiptCount = 0;
 
+  // Session view state, so we can re-render prescriptions live when a policy edits the program.
+  var currentFocus = null;         // today's day focus, e.g. "Front Squat"
+  var lastWeights = {};            // exercise -> last-seen prescribed weight (change detection + flash)
+  var haveBaseline = false;        // suppress the flash on the very first render
+  var progRefs = [];               // [{exercise, sets, el}] so set-progress updates without a full re-render
+
   function setConn(state) {
     led.className = 'led ' + (state === 'open' ? 'on' : state === 'closed' ? 'off' : '');
     connlbl.textContent = state === 'open' ? 'live' : state === 'closed' ? 'disconnected' : 'connecting…';
   }
 
-  function renderLifts(day, lifts) {
-    focusEl.textContent = day || 'Session';
-    daylabelEl.textContent = '';
+  // Count how many sets have been logged for a given exercise in the active session.
+  function loggedCount(active, exercise) {
+    var n = 0, sets = active && active.loggedSets ? active.loggedSets : [];
+    for (var i = 0; i < sets.length; i++) if (sets[i].exercise === exercise) n++;
+    return n;
+  }
+
+  // Resolve today's prescribed lifts from a full state broadcast (find the day by focus).
+  function liftsFromState(state) {
+    if (!state || !state.program || !state.program.days) return null;
+    var focus = (state.activeSession && state.activeSession.day) || currentFocus;
+    var days = state.program.days;
+    for (var i = 0; i < days.length; i++) if (days[i].focus === focus) return days[i].lifts;
+    return null;
+  }
+
+  // Refresh only the per-lift "logged N / M sets" line — no full re-render, so inputs the lifter is
+  // mid-typing (reps/weight, fail toggle) are never clobbered on a routine logged-set broadcast.
+  function updateProgress(active) {
+    for (var i = 0; i < progRefs.length; i++) {
+      var ref = progRefs[i];
+      var done = loggedCount(active, ref.exercise);
+      ref.el.textContent = 'logged ' + done + ' / ' + ref.sets + ' sets';
+      ref.el.className = 'prog' + (done >= ref.sets ? ' met' : '');
+    }
+  }
+
+  function renderLifts(lifts, active) {
     liftsEl.innerHTML = '';
+    progRefs = [];
     if (!lifts || !lifts.length) { liftsEl.innerHTML = '<div class="muted">No prescribed lifts.</div>'; return; }
     lifts.forEach(function (l) {
       if (l.kind === 'rounds') return; // circuits aren't set-logged here
+      var w = (l.weight != null ? l.weight : null);
+      var prev = lastWeights.hasOwnProperty(l.exercise) ? lastWeights[l.exercise] : undefined;
+      var changed = haveBaseline && prev !== undefined && prev !== w;
+
       var row = document.createElement('div');
-      row.className = 'lift';
+      row.className = 'lift' + (changed ? ' changed' : '');
 
       var name = document.createElement('span');
       name.className = 'name';
@@ -146,7 +204,17 @@ export function renderSession(): string {
 
       var rx = document.createElement('span');
       rx.className = 'rx';
-      rx.textContent = l.sets + '×' + l.reps + (l.weight != null ? ' @ ' + l.weight + (l.perSide ? ' /side' : '') : '');
+      // "4 × 8 @ 125 lb"  (+ "→ was 130" delta chip when a policy just changed it)
+      var rxHtml = l.sets + ' × ' + l.reps;
+      if (w != null) rxHtml += ' @ <span class="wt">' + w + ' lb' + (l.perSide ? ' /side' : '') + '</span>';
+      else rxHtml += ' @ <span class="wt">BW</span>';
+      if (changed) rxHtml += '<span class="delta">' + (w > prev ? '▲' : '▼') + ' was ' + prev + '</span>';
+      rx.innerHTML = rxHtml;
+
+      var done = loggedCount(active, l.exercise);
+      var prog = document.createElement('span');
+      prog.className = 'prog' + (done >= l.sets ? ' met' : '');
+      prog.textContent = 'logged ' + done + ' / ' + l.sets + ' sets';
 
       var ctl = document.createElement('span');
       ctl.className = 'ctl';
@@ -154,14 +222,15 @@ export function renderSession(): string {
       reps.type = 'number'; reps.value = l.reps; reps.min = '1'; reps.setAttribute('aria-label', 'reps');
       var xspan = document.createElement('span'); xspan.className = 'x'; xspan.textContent = '×';
       var wt = document.createElement('input');
-      wt.type = 'number'; wt.value = (l.weight != null ? l.weight : ''); wt.placeholder = 'BW'; wt.setAttribute('aria-label', 'weight');
+      wt.className = 'wt';
+      wt.type = 'number'; wt.value = (w != null ? w : ''); wt.placeholder = 'BW'; wt.setAttribute('aria-label', 'weight');
       var fail = document.createElement('button');
       fail.type = 'button'; fail.className = 'fail'; fail.textContent = 'fail';
       var failed = false;
       fail.addEventListener('click', function () { failed = !failed; fail.classList.toggle('on', failed); });
-      var log = document.createElement('button');
-      log.type = 'button'; log.textContent = 'log';
-      log.addEventListener('click', function () {
+      var logBtn = document.createElement('button');
+      logBtn.type = 'button'; logBtn.textContent = 'log';
+      logBtn.addEventListener('click', function () {
         var r = parseInt(reps.value, 10);
         if (!r || r < 1) return;
         var wv = wt.value === '' ? null : parseFloat(wt.value);
@@ -171,10 +240,26 @@ export function renderSession(): string {
         failed = false; fail.classList.remove('on');
       });
 
-      ctl.appendChild(reps); ctl.appendChild(xspan); ctl.appendChild(wt); ctl.appendChild(fail); ctl.appendChild(log);
-      row.appendChild(name); row.appendChild(rx); row.appendChild(ctl);
+      ctl.appendChild(reps); ctl.appendChild(xspan); ctl.appendChild(wt); ctl.appendChild(fail); ctl.appendChild(logBtn);
+      row.appendChild(name); row.appendChild(rx); row.appendChild(prog); row.appendChild(ctl);
       liftsEl.appendChild(row);
+
+      progRefs.push({ exercise: l.exercise, sets: l.sets, el: prog });
+      lastWeights[l.exercise] = w;
     });
+    haveBaseline = true;
+  }
+
+  // True if any prescribed weight differs from what we last rendered (i.e. a policy edited the program).
+  function weightsChanged(lifts) {
+    if (!lifts) return false;
+    for (var i = 0; i < lifts.length; i++) {
+      var l = lifts[i];
+      if (l.kind === 'rounds') continue;
+      var w = (l.weight != null ? l.weight : null);
+      if (lastWeights.hasOwnProperty(l.exercise) && lastWeights[l.exercise] !== w) return true;
+    }
+    return false;
   }
 
   function renderLogged(active) {
@@ -185,9 +270,12 @@ export function renderSession(): string {
       var row = document.createElement('div');
       row.className = 'row';
       var left = document.createElement('span');
-      left.textContent = (i + 1) + '. ' + s.exercise;
+      left.className = 'lbl';
+      left.innerHTML = '<span class="n">' + (i + 1) + '.</span> ' + esc(s.exercise);
       var right = document.createElement('span');
-      right.innerHTML = s.reps + ' × <b>' + (s.weight ? s.weight + ' lb' : 'BW') + '</b>';
+      right.className = 'val';
+      right.innerHTML = '<span class="reps">' + s.reps + ' reps</span> · <b>' +
+        (s.weight ? s.weight : 'BW') + '</b>' + (s.weight ? '<span class="lb"> lb</span>' : '');
       row.appendChild(left); row.appendChild(right);
       loggedEl.appendChild(row);
     });
@@ -237,15 +325,25 @@ export function renderSession(): string {
   function handle(msg) {
     switch (msg.type) {
       case 'session_hello':
-        renderLifts(msg.day, msg.lifts);
-        if (msg.dayLabel) daylabelEl.textContent = msg.dayLabel;
+        currentFocus = msg.day || null;
+        focusEl.textContent = msg.day || 'Session';
+        daylabelEl.textContent = msg.dayLabel || '';
+        renderLifts(msg.lifts, msg.activeSession);   // seeds lastWeights (no flash on first paint)
         renderLogged(msg.activeSession);
         break;
       case 'cf_agent_state':
-        if (msg.state && msg.state.activeSession) renderLogged(msg.state.activeSession);
+        // The SDK re-broadcasts full state on every setState — including a policy's program edit.
+        // Re-render prescriptions ONLY when a weight actually changed (so we don't reset inputs the
+        // lifter is mid-typing); always refresh the logged list + per-lift progress.
+        if (msg.state) {
+          var lifts = liftsFromState(msg.state);
+          if (lifts && weightsChanged(lifts)) renderLifts(lifts, msg.state.activeSession);
+          updateProgress(msg.state.activeSession);   // always: cheap, never resets inputs
+          renderLogged(msg.state.activeSession);
+        }
         break;
       case 'set_logged':
-        addReceipt('logged <b>' + esc(msg.exercise) + '</b> ' + msg.reps + (msg.weight != null ? ' @ ' + msg.weight : '') + (msg.failed ? ' <span style="color:#ff8f8f">(failed)</span>' : ''), false);
+        addReceipt('logged <b>' + esc(msg.exercise) + '</b> ' + msg.reps + (msg.weight != null ? ' @ ' + msg.weight + ' lb' : '') + (msg.failed ? ' <span style="color:#ff8f8f">(failed)</span>' : ''), false);
         break;
       case 'rest_started':
         startRest(msg.seconds);
@@ -254,7 +352,7 @@ export function renderSession(): string {
         restDone();
         break;
       case 'plugin_fired':
-        var changed = msg.changed && msg.changed.length ? ' · ' + msg.changed.map(esc).join(', ') : ' · no change';
+        var changed = msg.changed && msg.changed.length ? ' · adjusted ' + msg.changed.map(esc).join(', ') : ' · no change';
         addReceipt('<b>' + esc(msg.name) + '</b> fired · ' + msg.ms + ' ms · ' + (msg.cold ? 'cold' : 'warm') + ' · <b>0 tokens</b>' + changed, true);
         break;
       case 'error':
