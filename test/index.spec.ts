@@ -25,6 +25,22 @@ describe("liftty worker (M0)", () => {
 	});
 });
 
+// design-refresh: the new landing route at "/" (shared header + wordmark + entry rows).
+describe("liftty landing (design-refresh)", () => {
+	it("serves the landing page at / with the wordmark and entry rows", async () => {
+		const response = await SELF.fetch("https://example.com/");
+		expect(response.status).toBe(200);
+		const html = await response.text();
+		expect(html).toContain('class="wordmark"');
+		expect(html).toContain("liftty");
+		// The four entry rows link into the app.
+		expect(html).toContain('href="/plan"');
+		expect(html).toContain('href="/session"');
+		expect(html).toContain('href="/chat"');
+		expect(html).toContain('href="/flow"');
+	});
+});
+
 // M4: the live workout session page renders and wires a raw WS to the agent.
 describe("liftty /session (M4)", () => {
 	it("serves the /session page with the live-session markup", async () => {
@@ -36,7 +52,26 @@ describe("liftty /session (M4)", () => {
 		// The page must open a raw WS to the agent and speak the log_set protocol.
 		expect(html).toContain("/agents/liftty-agent/me");
 		expect(html).toContain("log_set");
-		expect(html).toContain("Receipts");
+		expect(html).toContain("receipts");
+		// design-refresh: the configurable rest timer — editable chip + the set_rest frame it sends.
+		expect(html).toContain("set_rest");
+		expect(html).toContain('id="restchip"');
+	});
+});
+
+// design-refresh: the configurable rest timer is a real, persisted setting on the agent.
+describe("liftty rest config (design-refresh)", () => {
+	it("defaults to 60s and setRestSeconds persists a clamped value", async () => {
+		const a = await agent("rest-config");
+		// Fresh DO seeds the 60s default.
+		expect((await a.dumpState()).restSeconds).toBe(60);
+		// Setting it clamps to 5–600 and persists.
+		expect((await a.setRestSeconds({ seconds: 90 })).restSeconds).toBe(90);
+		expect((await a.setRestSeconds({ seconds: 5000 })).restSeconds).toBe(600);
+		expect((await a.setRestSeconds({ seconds: 1 })).restSeconds).toBe(5);
+		// A fresh handle to the same DO reads the persisted value from durable state.
+		const b = await agent("rest-config");
+		expect((await b.dumpState()).restSeconds).toBe(5);
 	});
 });
 
@@ -370,6 +405,32 @@ describe("liftty program scheme edits (coach sets/reps)", () => {
 		const pull = (await a.getProgram()).days.flatMap((d: { lifts: unknown[] }) => d.lifts).find((l: { exercise: string }) => l.exercise === "Pull-ups");
 		expect(pull.sets).toBe(3);
 		expect(pull.reps).toBe(10);
+	});
+
+	// design-refresh: the /session chip path passes exact:true so editing one lift never rewrites a
+	// name-substring sibling ("Front Squat" must not touch "Pause Front Squat (2s)").
+	it("exact:true matches only the named lift, not substring siblings", async () => {
+		const a = await agent("scheme-exact");
+		await a.reseed(); // Day A has "Front Squat" (4×8) and "Pause Front Squat (2s)" (3×5)
+		const res = await a.adjustProgram({ op: "setExerciseScheme", exercise: "Front Squat", sets: 4, reps: 5, exact: true });
+		expect(res.changed).toContain("Front Squat");
+		expect(res.changed).not.toContain("Pause Front Squat (2s)");
+		const dayA = (await a.getProgram()).days[0].lifts;
+		const fs = dayA.find((l: { exercise: string }) => l.exercise === "Front Squat");
+		const pause = dayA.find((l: { exercise: string }) => l.exercise === "Pause Front Squat (2s)");
+		expect([fs.sets, fs.reps]).toEqual([4, 5]);
+		expect([pause.sets, pause.reps]).toEqual([3, 5]); // untouched
+	});
+
+	// design-refresh: a non-finite scheme value (crafted WS frame → NaN) is skipped, never written.
+	it("skips a non-finite sets/reps instead of persisting NaN", async () => {
+		const a = await agent("scheme-nan");
+		await a.reseed();
+		const res = await a.adjustProgram({ op: "setExerciseScheme", exercise: "Pull-ups", sets: NaN as unknown as number });
+		expect(res.changed).not.toContain("Pull-ups");
+		const pull = (await a.getProgram()).days.flatMap((d: { lifts: unknown[] }) => d.lifts).find((l: { exercise: string }) => l.exercise === "Pull-ups");
+		expect(Number.isFinite(pull.sets)).toBe(true);
+		expect(pull.sets).toBe(4); // pristine, unchanged
 	});
 
 	it("clamps out-of-range values and reports no change when already at target", async () => {
