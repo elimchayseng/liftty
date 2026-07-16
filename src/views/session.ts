@@ -66,8 +66,10 @@ export function renderSession(): string {
   .lift .prog { grid-column: 1; font-size: 11px; color: #6b7280; font-variant-numeric: tabular-nums; }
   .lift .prog.met { color: #3fb950; }
   .lift .ctl { grid-column: 2; grid-row: 1 / span 3; display: flex; align-items: center; gap: 6px; }
-  .lift input { width: 52px; background: #0e1116; border: 1px solid #232830; border-radius: 8px; padding: 8px; color: #e8eaed; font-size: 15px; text-align: center; font-variant-numeric: tabular-nums; }
-  .lift input.wt { border-color: #3a2f18; color: #f6c177; font-weight: 700; }
+  .lift input { width: 46px; background: #0e1116; border: 1px solid #232830; border-radius: 8px; padding: 8px 6px; color: #e8eaed; font-size: 15px; text-align: center; font-variant-numeric: tabular-nums; -moz-appearance: textfield; appearance: textfield; }
+  /* drop the number spinners — they reserve right-edge space and clip 3-digit weights */
+  .lift input::-webkit-outer-spin-button, .lift input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .lift input.wt { width: 68px; border-color: #3a2f18; color: #f6c177; font-weight: 700; }
   .lift input:focus { outline: none; border-color: #f6821f; }
   .lift .x { color: #6b7280; font-size: 12px; }
   .lift button { background: #f6821f; color: #0b0d10; border: none; border-radius: 8px; padding: 8px 12px; font-weight: 700; font-size: 13px; }
