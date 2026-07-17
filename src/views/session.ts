@@ -23,21 +23,21 @@ export function renderSession(): string {
   .stage { padding: 20px; padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
 
   /* live indicator (square, per spec) */
-  .conn { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+  .conn { display: flex; align-items: center; gap: 8px; font-family: var(--ui); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
   .conn .sq { width: 7px; height: 7px; display: inline-block; background: var(--faint); }
   .conn.on { color: var(--live); } .conn.on .sq { background: var(--live); }
   .conn.off { color: #ff6b6b; } .conn.off .sq { background: #ff6b6b; }
 
-  .eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--accent); margin-bottom: 6px; }
+  .eyebrow { font-family: var(--ui); font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--accent); margin-bottom: 6px; }
   .focus { font-family: var(--display); font-size: 34px; font-weight: 900; letter-spacing: -0.02em; line-height: 1; }
 
   /* rest timer row */
-  #rest { border: 1px dashed var(--line-dash); margin-top: 20px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; font-family: var(--mono); color: var(--faint); font-size: 13px; }
+  #rest { border: 1px dashed var(--line-dash); margin-top: 20px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; font-family: var(--ui); color: var(--faint); font-size: 13px; }
   #rest .right { display: flex; align-items: center; gap: 8px; }
   #rest #rest-run { display: none; }
   #rest.on #rest-idle { display: none; }
   #rest.on #rest-run { display: flex; }
-  #restchip { width: 56px; border: 1px solid var(--line-strong); padding: 5px 8px; background: transparent; color: var(--ink); font-family: var(--mono); font-size: 17px; font-weight: 600; text-align: center; -moz-appearance: textfield; appearance: textfield; }
+  #restchip { width: 56px; border: 1px solid var(--line-strong); padding: 5px 8px; background: transparent; color: var(--ink); font-family: var(--ui); font-size: 17px; font-weight: 600; text-align: center; font-variant-numeric: tabular-nums; -moz-appearance: textfield; appearance: textfield; }
   #restchip::-webkit-outer-spin-button, #restchip::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
   #restchip:focus { outline: none; border-color: var(--accent); }
   .resthint { font-size: 11px; color: var(--faint); }
@@ -54,9 +54,9 @@ export function renderSession(): string {
     100% { background: transparent; outline: 1px solid rgba(246,130,31,0); outline-offset: -1px; }
   }
   .lift .top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-  .lift .lname { font-family: var(--mono); font-size: 13px; color: var(--sub); letter-spacing: 0.08em; text-transform: uppercase; }
-  .lift .chips { display: flex; align-items: center; gap: 7px; font-family: var(--mono); }
-  .lift .chip { width: 40px; border: 1px solid var(--line-strong); padding: 5px 8px; background: transparent; color: var(--ink); font-family: var(--mono); font-size: 17px; font-weight: 600; text-align: center; -moz-appearance: textfield; appearance: textfield; }
+  .lift .lname { font-family: var(--ui); font-size: 13px; color: var(--sub); letter-spacing: 0.08em; text-transform: uppercase; }
+  .lift .chips { display: flex; align-items: center; gap: 7px; font-family: var(--ui); }
+  .lift .chip { width: 40px; border: 1px solid var(--line-strong); padding: 5px 8px; background: transparent; color: var(--ink); font-family: var(--ui); font-size: 17px; font-weight: 600; text-align: center; font-variant-numeric: tabular-nums; -moz-appearance: textfield; appearance: textfield; }
   .lift .chip::-webkit-outer-spin-button, .lift .chip::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
   .lift .chip:focus { outline: none; border-color: var(--accent); }
   .lift .cx { color: var(--faint); font-size: 14px; }
@@ -64,29 +64,29 @@ export function renderSession(): string {
   .lift .mid { display: flex; align-items: flex-end; justify-content: space-between; margin-top: 12px; }
   .lift .weight { display: flex; align-items: baseline; gap: 6px; }
   .lift .weight .big { font-family: var(--display); font-size: 56px; font-weight: 900; letter-spacing: -0.03em; line-height: 0.85; }
-  .lift .weight .lb { font-family: var(--mono); font-size: 13px; color: var(--faint); }
-  .lift .delta { font-family: var(--mono); font-size: 11px; color: var(--accent); margin-left: 8px; align-self: center; }
-  .lift .prog { text-align: right; font-family: var(--mono); font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
+  .lift .weight .lb { font-family: var(--ui); font-size: 13px; color: var(--faint); }
+  .lift .delta { font-family: var(--ui); font-size: 11px; color: var(--accent); margin-left: 8px; align-self: center; font-variant-numeric: tabular-nums; }
+  .lift .prog { text-align: right; font-family: var(--ui); font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
   .lift .prog.met { color: var(--live); }
   .lift .ctl { display: flex; gap: 8px; margin-top: 16px; align-items: stretch; }
-  .lift .field { flex: 1; border: 1px solid var(--line-strong); padding: 0 10px; display: flex; align-items: center; justify-content: center; gap: 6px; font-family: var(--mono); }
-  .lift .field input { width: 100%; min-width: 0; background: transparent; border: none; color: var(--ink); font-family: var(--mono); font-size: 16px; text-align: center; padding: 12px 0; -moz-appearance: textfield; appearance: textfield; }
+  .lift .field { flex: 1; border: 1px solid var(--line-strong); padding: 0 10px; display: flex; align-items: center; justify-content: center; gap: 6px; font-family: var(--ui); }
+  .lift .field input { width: 100%; min-width: 0; background: transparent; border: none; color: var(--ink); font-family: var(--ui); font-size: 16px; text-align: center; padding: 12px 0; font-variant-numeric: tabular-nums; -moz-appearance: textfield; appearance: textfield; }
   .lift .field input:focus { outline: none; }
   .lift .field input::-webkit-outer-spin-button, .lift .field input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
   .lift .field .u { color: var(--faint); font-size: 12px; }
   .lift .field.wt { border-color: #3a2f18; }
   .lift .field.wt input { color: var(--marker); font-weight: 600; }
-  .lift .fail { border: 1px solid var(--line-strong); background: transparent; color: var(--sub); font-family: var(--mono); font-size: 12px; padding: 0 14px; cursor: pointer; }
+  .lift .fail { border: 1px solid var(--line-strong); background: transparent; color: var(--sub); font-family: var(--ui); font-size: 12px; padding: 0 14px; cursor: pointer; }
   .lift .fail.on { background: #ff6b6b; color: var(--bg); border-color: #ff6b6b; }
   .lift .log { border: none; background: var(--marker); color: var(--bg); font-family: var(--display); font-weight: 800; font-size: 13px; padding: 0 18px; cursor: pointer; }
 
-  .slabel { font-family: var(--mono); font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--faint); margin: 24px 0 12px; }
+  .slabel { font-family: var(--ui); font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--faint); margin: 24px 0 12px; }
   #receipts { display: flex; flex-direction: column; gap: 8px; }
   .receipt { border-left: 2px solid var(--live); padding: 8px 12px; font-family: var(--mono); font-size: 11px; color: var(--sub); background: rgba(255,255,255,0.02); }
   .receipt b, .receipt .ink { color: var(--ink); }
   .receipt.plugin { border-left-color: var(--accent); color: var(--marker); }
-  .err { font-family: var(--mono); color: #ff6b6b; font-size: 12px; padding: 6px 2px; }
-  .empty { font-family: var(--mono); font-size: 12px; color: var(--faint); }`;
+  .err { font-family: var(--ui); color: #ff6b6b; font-size: 12px; padding: 6px 2px; }
+  .empty { font-family: var(--ui); font-size: 12px; color: var(--faint); }`;
 
 	const live = `<span class="conn" id="conn"><span class="sq"></span><span id="connlbl">connecting</span></span>`;
 

@@ -20,9 +20,9 @@ export function renderLanding(): string {
   .entry { display: flex; align-items: center; justify-content: space-between; padding: 20px 4px; border-bottom: 1px solid var(--line); color: var(--ink); }
   .entry:hover { color: var(--ink); }
   .entry .label { font-family: var(--display); font-weight: 700; font-size: 19px; }
-  .entry .desc { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-top: 2px; }
-  .entry .arrow { font-family: var(--mono); color: var(--accent); }
-  .entry.faint { padding: 16px 4px; color: var(--faint); font-family: var(--mono); font-size: 12px; }
+  .entry .desc { font-family: var(--ui); font-size: 11px; color: var(--faint); margin-top: 2px; }
+  .entry .arrow { font-family: var(--ui); color: var(--accent); }
+  .entry.faint { padding: 16px 4px; color: var(--faint); font-family: var(--ui); font-size: 12px; }
   .entry.faint:hover { color: var(--marker); }`;
 
 	return `${renderHead("today", css)}
