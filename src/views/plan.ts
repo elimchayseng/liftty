@@ -1,4 +1,4 @@
-import type { State, SessionRow, Lift, PrescribedDay } from "../server";
+import type { State, SessionRow, Lift, PrescribedDay, ProgramChangeRow } from "../server";
 import type { PluginSummary } from "../training";
 import { renderHead, renderHeader } from "./shared";
 
@@ -11,9 +11,10 @@ import { renderHead, renderHeader } from "./shared";
  * injury sentences, goal sentence) is intentionally dropped per the "no full-stop sentences" rule —
  * the data it summarized lives in the structured sections below.
  */
-export function renderPlan(data: { state: State; recentSessions: SessionRow[]; today: number; plugins?: PluginSummary[] }): string {
+export function renderPlan(data: { state: State; recentSessions: SessionRow[]; today: number; plugins?: PluginSummary[]; recentChanges?: ProgramChangeRow[] }): string {
 	const { state, recentSessions, today } = data;
 	const plugins = data.plugins ?? [];
+	const recentChanges = data.recentChanges ?? [];
 	const { lifter, program } = state;
 	const days = program.days;
 	const todayDay = days[today];
@@ -59,6 +60,17 @@ export function renderPlan(data: { state: State; recentSessions: SessionRow[]; t
   .policy + .policy { margin-top: 8px; }
   .policy .pname { color: var(--ink); }
   .policy .zero { color: var(--live); }
+
+  /* plan change history: a legible timeline of every program move + who made it + why */
+  .change { padding: 12px 0; border-bottom: 1px solid var(--line); font-family: var(--ui); font-size: 13px; }
+  .change:last-child { border-bottom: none; }
+  .change .ctop { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .change .csum { color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; }
+  .change .cwhen { color: var(--faint); white-space: nowrap; font-size: 11px; }
+  .change .cmeta { margin-top: 3px; font-size: 11px; color: var(--faint); }
+  .change .csrc { color: var(--sub); }
+  .change .csrc.plugin { color: var(--accent); }
+  .change .creason { color: var(--faint); font-style: italic; }
   .empty { font-family: var(--ui); font-size: 12px; color: var(--faint); }`;
 
 	const heroTag = todayDay ? `<span class="hero-tag">${esc(todayDay.day)}</span>` : "";
@@ -113,9 +125,41 @@ export function renderPlan(data: { state: State; recentSessions: SessionRow[]; t
 				? `<div class="box">${recentSessions.map(renderSession).join("")}</div>`
 				: `<div class="box"><div class="row"><span class="empty">No logged sessions yet.</span></div></div>`
 		}
+
+    ${
+			recentChanges.length
+				? `<div class="slabel">plan changes</div>
+    <div class="box">${recentChanges.map(renderChange).join("")}</div>`
+				: ""
+		}
   </div>
 </body>
 </html>`;
+}
+
+/** One program-change row: what moved (summary) + when, with source + reason underneath. */
+function renderChange(c: ProgramChangeRow): string {
+	const isPlugin = c.source.startsWith("plugin:");
+	const reason = c.reason ? ` · <span class="creason">${esc(c.reason)}</span>` : "";
+	return `<div class="change">
+    <div class="ctop"><span class="csum">${esc(c.summary)}</span><span class="cwhen">${esc(relTime(c.at))}</span></div>
+    <div class="cmeta"><span class="csrc${isPlugin ? " plugin" : ""}">${esc(c.source)}</span>${reason}</div>
+  </div>`;
+}
+
+/** Compact relative time for the change log ("just now", "3h ago", "2d ago"), falling back to the date. */
+function relTime(iso: string): string {
+	const t = Date.parse(iso);
+	if (Number.isNaN(t)) return iso;
+	const sec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+	if (sec < 60) return "just now";
+	const min = Math.floor(sec / 60);
+	if (min < 60) return `${min}m ago`;
+	const hr = Math.floor(min / 60);
+	if (hr < 24) return `${hr}h ago`;
+	const d = Math.floor(hr / 24);
+	if (d < 7) return `${d}d ago`;
+	return iso.slice(0, 10);
 }
 
 /** One prescribed lift in the TODAY hero: name + scheme sub on the left, weight as the big value right. */

@@ -18,6 +18,7 @@ import {
 	type SetInput,
 	type ProgramChange,
 	type AdjustResult,
+	type ChangeMeta,
 } from "./training";
 import {
 	createPlugin as createPluginImpl,
@@ -176,8 +177,50 @@ export type SessionRow = {
 	date: string;
 	status: string;
 	prescribed: string; // JSON
-	actuals: string; // JSON: { focus, summary, week, day }
+	actuals: string; // JSON: { focus, summary, week, day, loggedSets? }
 };
+
+/** One before→after delta inside a program change (exercise null for whole-program ops). */
+export type ChangeDelta = { exercise: string | null; before: string | number | null; after: string | number | null };
+
+/** One row of the `program_changes` audit trail, JSON-decoded for the /plan + /db reads. */
+export type ProgramChangeRow = {
+	at: string;
+	op: string;
+	summary: string;
+	detail: ChangeDelta[];
+	source: string;
+	reason: string | null;
+};
+
+/**
+ * Roll an active session's logged sets into one per-exercise summary line for the history row —
+ * "Front Squat 4×8 @ 125 · RDL 3×8 @ 115". Groups by exercise in first-logged order; collapses a
+ * rep range (5–8) when reps varied; shows the top weight per exercise (0/bodyweight → no load shown).
+ */
+function summarizeSets(sets: { exercise: string; reps: number; weight: number }[]): string {
+	const order: string[] = [];
+	const byEx = new Map<string, { reps: number; weight: number }[]>();
+	for (const s of sets) {
+		if (!byEx.has(s.exercise)) {
+			byEx.set(s.exercise, []);
+			order.push(s.exercise);
+		}
+		byEx.get(s.exercise)!.push({ reps: s.reps, weight: s.weight });
+	}
+	return order
+		.map((ex) => {
+			const list = byEx.get(ex)!;
+			const reps = list.map((x) => x.reps);
+			const lo = Math.min(...reps);
+			const hi = Math.max(...reps);
+			const repStr = lo === hi ? `${lo}` : `${lo}–${hi}`;
+			const weights = list.map((x) => x.weight).filter((w) => w > 0);
+			const wStr = weights.length ? ` @ ${Math.max(...weights)}` : "";
+			return `${ex} ${list.length}×${repStr}${wStr}`;
+		})
+		.join(" · ");
+}
 
 /** One shaped table in the /db read-only snapshot. `rows`/`columns` empty for count-only tables. */
 export type DbTable = { name: string; rowCount: number; columns: string[]; rows: Record<string, unknown>[] };
@@ -376,9 +419,12 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 		return { activeSets: loggedSets.length, message: `Logged ${set.exercise} ${set.reps}${w} (set ${loggedSets.length} of ${active.day})` };
 	}
 
-	adjustProgram(change: ProgramChange): AdjustResult {
+	adjustProgram(change: ProgramChange, meta?: ChangeMeta): AdjustResult {
 		const program = structuredClone(this.state.program);
-		const changed: string[] = [];
+		// Every genuine before→after move is captured as a delta, so the change is both reportable to the
+		// lifter (`changed`) AND recordable on the audit trail (`recordProgramChange`) from this one path.
+		const deltas: ChangeDelta[] = [];
+		let summary = "";
 		switch (change.op) {
 			case "deload": {
 				// Clamp magnitude here, in the one validated write path, so BOTH the tools path (jsonSchema
@@ -389,10 +435,12 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 				for (const d of program.days)
 					for (const l of d.lifts)
 						if (l.weight != null) {
+							const before = l.weight;
 							l.weight = Math.round((l.weight * (1 - pct / 100)) / 5) * 5;
-							changed.push(l.exercise);
+							if (l.weight !== before) deltas.push({ exercise: l.exercise, before, after: l.weight });
 						}
 				program.phase = program.phase.replace(/ · deload wk$/, "") + " · deload wk";
+				summary = `deload ${pct}% · ${deltas.length} lift${deltas.length === 1 ? "" : "s"}`;
 				break;
 			}
 			case "setExerciseWeight": {
@@ -401,9 +449,11 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 				for (const d of program.days)
 					for (const l of d.lifts)
 						if (l.exercise.toLowerCase().includes(q)) {
+							if (l.weight !== weight) deltas.push({ exercise: l.exercise, before: l.weight ?? null, after: weight });
 							l.weight = weight;
-							changed.push(l.exercise);
 						}
+				summary =
+					deltas.length === 1 ? `${deltas[0].exercise} → ${weight} lb` : `${deltas.length} lift${deltas.length === 1 ? "" : "s"} → ${weight} lb`;
 				break;
 			}
 			case "setExerciseScheme": {
@@ -423,6 +473,7 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 				for (const d of program.days)
 					for (const l of d.lifts)
 						if (matches(l.exercise)) {
+							const before = `${l.sets}×${l.reps}`;
 							let touched = false;
 							if (clampSets != null && l.sets !== clampSets) {
 								l.sets = clampSets;
@@ -432,20 +483,94 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 								l.reps = clampReps;
 								touched = true;
 							}
-							if (touched) changed.push(l.exercise);
+							if (touched) deltas.push({ exercise: l.exercise, before, after: `${l.sets}×${l.reps}` });
 						}
+				summary = deltas.length === 1 ? `${deltas[0].exercise} ${deltas[0].before} → ${deltas[0].after}` : `${deltas.length} lifts rescheme`;
 				break;
 			}
-			case "advanceWeek":
+			case "advanceWeek": {
+				const before = program.weekIndex;
 				program.weekIndex += 1;
+				deltas.push({ exercise: null, before, after: program.weekIndex });
+				summary = `advance to week ${program.weekIndex}`;
 				break;
-			case "setPhase":
+			}
+			case "setPhase": {
+				const before = program.phase;
 				program.phase = change.phase;
 				if (change.goal) program.goal = change.goal;
+				if (program.phase !== before) deltas.push({ exercise: null, before, after: program.phase });
+				summary = `phase → ${change.phase}`;
 				break;
+			}
 		}
+		const changed = [...new Set(deltas.map((d) => d.exercise).filter((e): e is string => !!e))];
 		this.setState({ ...this.state, program });
-		return { program: this.getProgram(), changed: [...new Set(changed)] };
+		// Record every mutation that actually moved something — coach, /session chip, or a fired plugin
+		// all land here (the single validated write path), so the plan's timeline is complete by construction.
+		if (deltas.length) this.recordProgramChange(change.op, summary, deltas, meta);
+		return { program: this.getProgram(), changed };
+	}
+
+	/**
+	 * Append one audit row per program mutation to `program_changes` — the plan's own timeline. Called
+	 * ONLY from adjustProgram (the single write path), so no change escapes it. Stores the structured
+	 * before→after deltas plus provenance (`source`) and the optional human `reason`. Pruned to the
+	 * newest 500 (generous — that's a whole training block of edits). Then broadcasts a `program_changed`
+	 * event so open /session + /flow clients can surface the change live.
+	 */
+	private recordProgramChange(op: string, summary: string, detail: ChangeDelta[], meta?: ChangeMeta): void {
+		const at = new Date().toISOString();
+		const source = meta?.source ?? "coach";
+		const reason = meta?.reason?.trim() || null;
+		this.sql`INSERT INTO program_changes (at, op, summary, detail, source, reason)
+			VALUES (${at}, ${op}, ${summary}, ${JSON.stringify(detail)}, ${source}, ${reason})`;
+		this.sql`DELETE FROM program_changes WHERE id NOT IN (SELECT id FROM program_changes ORDER BY id DESC LIMIT 500)`;
+		this.broadcast(JSON.stringify({ type: "program_changed", op, summary, source, ...(reason ? { reason } : {}), at }));
+	}
+
+	/** Read the plan's change history, newest first, JSON-decoding each row's delta array. For /plan + tests. */
+	getProgramChanges(limit = 20): ProgramChangeRow[] {
+		const rows = this.sql<{ at: string; op: string; summary: string; detail: string; source: string; reason: string | null }>`
+			SELECT at, op, summary, detail, source, reason FROM program_changes ORDER BY id DESC LIMIT ${Math.max(1, Math.min(200, Math.floor(limit)))}`;
+		return rows.map((r) => {
+			let detail: ChangeDelta[] = [];
+			try {
+				detail = JSON.parse(r.detail) as ChangeDelta[];
+			} catch {
+				/* leave [] */
+			}
+			return { at: r.at, op: r.op, summary: r.summary, detail, source: r.source, reason: r.reason };
+		});
+	}
+
+	/**
+	 * Finalize the active workout into a durable `sessions` row — the ONLY path that turns live logged
+	 * sets into permanent history, so getHistory() and every plugin's `recentHistory` reflect real work
+	 * and not just the seed. Triggered by the /session Finish button (`session_complete` frame). A
+	 * session with no logged sets is discarded (cleared, not stored). Idempotent on id (`live-<startedAt>`,
+	 * unique per session). Clears activeSession and broadcasts `session_finalized`.
+	 */
+	finalizeSession(): { ok: boolean; id?: string; sets?: number; reason?: string } {
+		const active = this.state.activeSession;
+		if (!active) return { ok: false, reason: "no active session" };
+		if (!active.loggedSets.length) {
+			this.setState({ ...this.state, activeSession: null });
+			return { ok: false, reason: "no sets logged" };
+		}
+		const day = this.state.program.days.find((d) => d.focus === active.day);
+		const date = active.startedAt.slice(0, 10);
+		const id = `live-${active.startedAt}`; // startedAt is an ISO instant (ms precision) → unique per session
+		const summary = summarizeSets(active.loggedSets);
+		const week = this.state.program.weekIndex;
+		const actuals = JSON.stringify({ focus: active.day, summary, week, day: day?.day ?? "", loggedSets: active.loggedSets });
+		this.sql`INSERT INTO sessions (id, date, status, prescribed, actuals)
+			VALUES (${id}, ${date}, ${"completed"}, ${"{}"}, ${actuals})
+			ON CONFLICT(id) DO UPDATE SET date = excluded.date, status = excluded.status, actuals = excluded.actuals`;
+		const sets = active.loggedSets.length;
+		this.setState({ ...this.state, activeSession: null });
+		this.broadcast(JSON.stringify({ type: "session_finalized", id, day: active.day, week, sets, summary }));
+		return { ok: true, id, sets };
 	}
 
 	/**
@@ -551,6 +676,13 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 			}
 			return;
 		}
+		// NEW: the /session Finish button persists the active workout into permanent history. The result
+		// is sent to THIS connection; on success finalizeSession also broadcasts `session_finalized`.
+		if (msg.type === "session_complete") {
+			const res = this.finalizeSession();
+			connection.send(JSON.stringify({ type: "session_complete_result", ...res }));
+			return;
+		}
 		if (msg.type !== "log_set") return;
 		try {
 			if (!msg.exercise || typeof msg.reps !== "number") {
@@ -589,7 +721,9 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 		return {
 			sql: this.sql.bind(this),
 			loader: this.env.LOADER,
-			adjustProgram: (change: ProgramChange) => this.adjustProgram(change),
+			// Forward `meta` so a plugin's change is attributed to `plugin:<name>` (with its note as reason)
+			// on the audit trail — not misfiled as a coach edit.
+			adjustProgram: (change: ProgramChange, meta?: ChangeMeta) => this.adjustProgram(change, meta),
 		};
 	}
 
@@ -739,6 +873,20 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 			at TEXT NOT NULL
 		)`;
 
+		// PLAN-CHANGE-TRACKING: the plan's own audit trail. One row per program mutation from ANY path
+		// (coach / session-chip / plugin), written from the single validated adjustProgram write path with
+		// before→after deltas + provenance + optional human reason. Survives redeploy like `sessions`;
+		// pruned to newest 500 in recordProgramChange(). This is what makes plan evolution legible.
+		this.sql`CREATE TABLE IF NOT EXISTS program_changes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			at TEXT NOT NULL,
+			op TEXT NOT NULL,
+			summary TEXT NOT NULL,
+			detail TEXT NOT NULL DEFAULT '[]',
+			source TEXT NOT NULL DEFAULT 'coach',
+			reason TEXT
+		)`;
+
 		// FLOW-LIVE-EVENTS (demo reset): snapshots taken BEFORE a destructive resetDemo wipe, so a
 		// mis-fired reset is recoverable. Newest 3 kept (pruned in backupBeforeWipe()).
 		this.sql`CREATE TABLE IF NOT EXISTS demo_backups (
@@ -794,6 +942,7 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 	 */
 	reseed(extraSessions?: number): { ok: true } {
 		this.sql`DELETE FROM sessions`;
+		this.sql`DELETE FROM program_changes`; // a pristine reseed starts with an empty change log
 		this.seedSessions();
 		this.setState(SEED_STATE);
 
@@ -866,9 +1015,9 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 				.toArray()
 				.map((r) => r.name);
 		} catch {
-			names = ["demo_backups", "meta", "model_usage", "plugin_events", "plugins", "sessions"];
+			names = ["demo_backups", "meta", "model_usage", "plugin_events", "plugins", "program_changes", "sessions"];
 		}
-		const detailed = new Set(["plugins", "sessions", "plugin_events", "model_usage"]);
+		const detailed = new Set(["plugins", "sessions", "plugin_events", "model_usage", "program_changes"]);
 		const tables: DbTable[] = [];
 		for (const name of names) {
 			let rowCount = 0;
@@ -893,6 +1042,9 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 			} else if (name === "model_usage") {
 				order = "ORDER BY id DESC";
 				limit = 24;
+			} else if (name === "program_changes") {
+				order = "ORDER BY id DESC";
+				limit = 50;
 			} else if (name === "plugins") {
 				order = "ORDER BY created_at DESC";
 			}
@@ -1012,6 +1164,7 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 		this.sql`DELETE FROM plugins`;
 		this.sql`DELETE FROM plugin_events`;
 		this.sql`DELETE FROM sessions`;
+		this.sql`DELETE FROM program_changes`;
 		this.seedSessions();
 		this.setState({ ...SEED_STATE, program: structuredClone(DEMO_PROGRAM) as State["program"], activeSession: null });
 
@@ -1028,7 +1181,7 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 	}
 
 	/** RPC: everything the /plan view needs, in one round-trip. */
-	async getPlanData(): Promise<{ state: State; recentSessions: SessionRow[]; today: number; plugins: PluginSummary[] }> {
+	async getPlanData(): Promise<{ state: State; recentSessions: SessionRow[]; today: number; plugins: PluginSummary[]; recentChanges: ProgramChangeRow[] }> {
 		const recentSessions = this.sql<SessionRow>`
 			SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 10`;
 		return {
@@ -1036,6 +1189,7 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 			recentSessions,
 			today: todayIndex(this.state.program.days, recentSessions),
 			plugins: this.listPlugins(),
+			recentChanges: this.getProgramChanges(12),
 		};
 	}
 

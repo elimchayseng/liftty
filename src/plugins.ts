@@ -32,7 +32,7 @@
  * recursion. `globalOutbound:null` + `limits:{cpuMs,subRequests:0}` = deny-by-default blast radius.
  * A throwing plugin is recorded in `last_result` and skipped — it can never break `logSet`.
  */
-import type { ProgramChange, AdjustResult, ProgramView, SessionLog } from "./training";
+import type { ProgramChange, AdjustResult, ProgramView, SessionLog, ChangeMeta } from "./training";
 import type { Lift, State } from "./server";
 
 /** The event the DO dispatches to a plugin on every logged set. Pure data — no capabilities. */
@@ -88,7 +88,7 @@ export interface PluginHost {
 		...values: (string | number | boolean | null)[]
 	): T[];
 	loader: WorkerLoader;
-	adjustProgram(change: ProgramChange): AdjustResult;
+	adjustProgram(change: ProgramChange, meta?: ChangeMeta): AdjustResult;
 }
 
 /** RPC shape the harness entrypoint exposes back to the DO. */
@@ -282,8 +282,12 @@ export async function runPlugins(host: PluginHost, event: PluginEvent): Promise<
 
 			const actions = sanitizeActions(result?.actions);
 			applied = actions.length;
+				// The plugin's optional `note` is its own "why" — carry it onto the audit trail as the reason,
+				// stamped with `plugin:<name>` provenance (the plugin never sets its own source).
+				const reason = typeof result?.note === "string" && result.note.trim() ? result.note.trim() : undefined;
+				const meta: ChangeMeta = { source: `plugin:${row.name}`, reason };
 			for (const action of actions) {
-				const res = host.adjustProgram(action);
+				const res = host.adjustProgram(action, meta);
 				changed.push(...res.changed);
 			}
 			changed = [...new Set(changed)];
