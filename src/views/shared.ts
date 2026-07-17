@@ -2,7 +2,7 @@
  * Shared chrome for the server-rendered pages (design-refresh).
  *
  * One visual language, extending /flow: dark ground, hard hairline boxes (border-radius:0 everywhere,
- * no shadows), IBM Plex Mono for data + Archivo for display, one yellow highlighter per screen, a
+ * no shadows), Futura/Jost for UI text, Archivo for display, IBM Plex Mono for code + receipts, one yellow highlighter per screen, a
  * single Cloudflare-orange accent. `renderHead()` emits the doctype→</head> block (fonts + reset +
  * design tokens); `renderHeader()` emits the wordmark + right-slot (nav / live / toggle) that sits
  * atop every page. /flow is the reference and is not rebuilt — it only gains a nav link.
@@ -31,7 +31,7 @@ const NAV: { label: string; href: string }[] = [
 ];
 
 /**
- * `<!doctype …>` through `</head>`. Loads Archivo + IBM Plex Mono, sets the tokens as CSS custom
+ * `<!doctype …>` through `</head>`. Loads Archivo + Jost (Futura proxy) + IBM Plex Mono, sets the tokens as CSS custom
  * properties, applies the hard-line reset (radius:0, no shadows), and appends any page-specific CSS.
  */
 export function renderHead(subtitle: string, extraCss = ""): string {
@@ -43,7 +43,7 @@ export function renderHead(subtitle: string, extraCss = ""): string {
 <title>liftty · ${subtitle}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800;900&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800;900&family=Jost:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   :root {
     color-scheme: dark;
@@ -57,14 +57,15 @@ export function renderHead(subtitle: string, extraCss = ""): string {
     --marker: ${TOKENS.marker};
     --accent: ${TOKENS.accent};
     --live: ${TOKENS.live};
-    --mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-    --display: 'Archivo', -apple-system, BlinkMacSystemFont, sans-serif;
+    --mono: 'IBM Plex Mono', ui-monospace, monospace;   /* code snippet + receipts/ledger only */
+    --ui: 'Futura', 'Jost', sans-serif;                 /* all UI text: nav, labels, tags, data, numbers */
+    --display: 'Archivo', sans-serif;                   /* headings, wordmark, big numeric values */
   }
   * { box-sizing: border-box; margin: 0; padding: 0; border-radius: 0; }
   ::selection { background: var(--marker); color: var(--bg); }
   html, body { background: var(--bg); }
   body {
-    font: 16px/1.5 var(--display);
+    font: 16px/1.5 var(--ui);
     color: var(--ink);
     max-width: 640px; margin: 0 auto;
     -webkit-font-smoothing: antialiased;
@@ -77,7 +78,7 @@ export function renderHead(subtitle: string, extraCss = ""): string {
   .wordmark { font-family: var(--display); font-weight: 900; font-size: 22px; letter-spacing: -0.02em; color: var(--ink); display: flex; align-items: center; gap: 7px; }
   .wordmark:hover { color: var(--ink); }
   .tick { width: 7px; height: 7px; background: var(--accent); display: inline-block; margin-bottom: -2px; }
-  nav.nav { display: flex; gap: 16px; font-family: var(--mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+  nav.nav { display: flex; gap: 16px; font-family: var(--ui); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
   nav.nav a { color: var(--faint); }
   nav.nav a:hover { color: var(--marker); }
   nav.nav a.on { color: var(--ink); border-bottom: 2px solid var(--marker); padding-bottom: 2px; }
@@ -85,7 +86,7 @@ export function renderHead(subtitle: string, extraCss = ""): string {
   /* --- shared bits --- */
   .hl { background: var(--marker); color: var(--bg); padding: 0 6px; }
   .cta { display: flex; align-items: center; justify-content: center; gap: 10px; background: var(--marker); color: var(--bg); font-family: var(--display); font-weight: 800; border: none; cursor: pointer; }
-  .section-label { font-family: var(--mono); font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--faint); }
+  .section-label { font-family: var(--ui); font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--faint); }
 ${extraCss}
 </style>
 </head>`;

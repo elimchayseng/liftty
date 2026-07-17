@@ -12,7 +12,7 @@ export function renderChat(): string {
 	const css = `
   html, body { height: 100%; }
   body { display: flex; flex-direction: column; }
-  .seg { display: flex; border: 1px solid var(--line-strong); font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .seg { display: flex; border: 1px solid var(--line-strong); font-family: var(--ui); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
   .seg button { background: transparent; color: var(--faint); border: none; padding: 6px 10px; font: inherit; cursor: pointer; }
   .seg button.on { background: var(--marker); color: var(--bg); font-weight: 600; }
 
@@ -21,20 +21,20 @@ export function renderChat(): string {
   .msg { max-width: 88%; padding: 12px 14px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; }
   .coach { align-self: flex-start; border: 1px solid var(--line); color: #e8e7e0; }
   .me { align-self: flex-end; max-width: 85%; border-left: 2px solid var(--accent); background: rgba(255,255,255,0.03); color: var(--ink); }
-  .tools { align-self: flex-start; font-family: var(--mono); font-size: 11px; color: var(--faint); }
+  .tools { align-self: flex-start; font-family: var(--ui); font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
   .tools b { color: var(--accent); font-weight: 500; }
   .code { align-self: flex-start; max-width: 88%; border: 1px solid var(--line); border-left: 2px solid var(--accent); padding: 10px 12px; overflow-x: auto; }
   .code .cap { display: block; font-family: var(--mono); font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--faint); margin-bottom: 7px; }
   .code pre { font-family: var(--mono); font-size: 11px; color: #cbd2d9; line-height: 1.5; white-space: pre; }
-  .err { align-self: flex-start; font-family: var(--mono); color: #ff6b6b; font-size: 13px; }
+  .err { align-self: flex-start; font-family: var(--ui); color: #ff6b6b; font-size: 13px; }
 
   form { display: flex; gap: 8px; padding-top: 16px; }
-  input { flex: 1; background: transparent; border: 1px solid var(--line-strong); padding: 13px 14px; color: var(--ink); font-family: var(--mono); font-size: 14px; }
+  input { flex: 1; background: transparent; border: 1px solid var(--line-strong); padding: 13px 14px; color: var(--ink); font-family: var(--ui); font-size: 14px; }
   input::placeholder { color: var(--faint); }
   input:focus { outline: none; border-color: var(--accent); }
   button.send { padding: 0 20px; font-size: 14px; }
   button.send:disabled { opacity: 0.5; }
-  .hint { font-family: var(--mono); color: var(--faint); font-size: 11px; padding: 8px 2px 0; }`;
+  .hint { font-family: var(--ui); color: var(--faint); font-size: 11px; padding: 8px 2px 0; }`;
 
 	const toggle = `<div class="seg" id="seg" title="Code Mode: one snippet vs. Tools: one call at a time">
       <button id="cm" class="on" type="button">codemode</button>

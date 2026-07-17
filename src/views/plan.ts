@@ -24,28 +24,28 @@ export function renderPlan(data: { state: State; recentSessions: SessionRow[]; t
 	const css = `
   body { padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
   .main { padding: 20px; }
-  .lifter { font-family: var(--mono); font-size: 12px; color: var(--faint); }
-  .block { font-family: var(--mono); font-size: 12px; color: var(--sub); margin-top: 2px; }
+  .lifter { font-family: var(--ui); font-size: 12px; color: var(--faint); }
+  .block { font-family: var(--ui); font-size: 12px; color: var(--sub); margin-top: 2px; }
 
   .hero { border: 1px solid var(--accent); margin-top: 22px; padding: 20px; }
   .hero-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-  .eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--accent); }
-  .hero-tag { font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
+  .eyebrow { font-family: var(--ui); font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--accent); }
+  .hero-tag { font-family: var(--ui); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
   .focus { font-family: var(--display); font-size: 34px; font-weight: 900; letter-spacing: -0.02em; line-height: 1; }
   .hero-lifts { margin-top: 20px; }
   .hlift { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 14px 0; border-top: 1px solid var(--line); }
   .hlift .hname { font-family: var(--display); font-weight: 600; font-size: 15px; }
-  .hlift .hsub { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-top: 2px; }
-  .hlift .hval { text-align: right; font-family: var(--mono); white-space: nowrap; }
+  .hlift .hsub { font-family: var(--ui); font-size: 11px; color: var(--faint); margin-top: 2px; }
+  .hlift .hval { text-align: right; font-family: var(--ui); white-space: nowrap; font-variant-numeric: tabular-nums; }
   .hlift .hval .big { font-size: 24px; font-weight: 600; color: var(--ink); }
   .hlift .hval .unit { font-size: 11px; color: var(--faint); }
 
   a.start { font-size: 16px; padding: 16px; margin-top: 16px; text-decoration: none; }
   a.start:hover { color: var(--bg); }
 
-  .slabel { font-family: var(--mono); font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--faint); margin: 28px 0 12px; }
+  .slabel { font-family: var(--ui); font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--faint); margin: 28px 0 12px; }
   .box { border: 1px solid var(--line); padding: 4px 16px; }
-  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: 13px; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); font-family: var(--ui); font-size: 13px; font-variant-numeric: tabular-nums; }
   .row:last-child { border-bottom: none; }
   .row .rname { color: var(--ink); font-weight: 500; }
   .row .rname .rsub { display: block; color: var(--faint); font-size: 11px; font-weight: 400; margin-top: 3px; }
@@ -55,11 +55,11 @@ export function renderPlan(data: { state: State; recentSessions: SessionRow[]; t
   .row .dfocus { font-family: var(--display); font-weight: 600; font-size: 14px; color: var(--ink); }
   .row .dday { color: var(--faint); }
 
-  .policy { border: 1px dashed var(--line-dash); padding: 14px 16px; font-family: var(--mono); font-size: 12px; color: var(--sub); }
+  .policy { border: 1px dashed var(--line-dash); padding: 14px 16px; font-family: var(--ui); font-size: 12px; color: var(--sub); }
   .policy + .policy { margin-top: 8px; }
   .policy .pname { color: var(--ink); }
   .policy .zero { color: var(--live); }
-  .empty { font-family: var(--mono); font-size: 12px; color: var(--faint); }`;
+  .empty { font-family: var(--ui); font-size: 12px; color: var(--faint); }`;
 
 	const heroTag = todayDay ? `<span class="hero-tag">${esc(todayDay.day)}</span>` : "";
 	return `${renderHead("plan", css)}
