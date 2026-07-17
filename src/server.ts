@@ -724,6 +724,9 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 			// Forward `meta` so a plugin's change is attributed to `plugin:<name>` (with its note as reason)
 			// on the audit trail — not misfiled as a coach edit.
 			adjustProgram: (change: ProgramChange, meta?: ChangeMeta) => this.adjustProgram(change, meta),
+			// This DO's stable, globally-unique id — prefixes loader cache keys so one user's plugin
+			// isolate is never served to another user with the same plugin slug + version.
+			namespace: this.ctx.id.toString(),
 		};
 	}
 

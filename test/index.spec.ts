@@ -266,6 +266,28 @@ describe("liftty plugins (M5)", () => {
 		expect(list.some((p: { name: string }) => p.name === "broken")).toBe(false);
 	});
 
+	// (d0) Cache isolation: two DOs whose plugins slug to the SAME id at the SAME version must each run
+	// their OWN source. The loader `get()` cache is keyed by id string alone and shared across all DOs,
+	// so the key is namespaced by DO id — otherwise the second firing is a cache hit on the first DO's
+	// isolate and silently runs the wrong user's code. (Regression: pre-fix, fsB would be 111.)
+	it("isolates the loader cache per DO for a shared plugin slug", async () => {
+		const a = await agent("ns-collide-a");
+		const b = await agent("ns-collide-b");
+		await a.reseed();
+		await b.reseed();
+		const mk = (w: number) =>
+			`export default { onSetLogged(e) { return e.failed ? { actions: [{ op: "setExerciseWeight", exercise: "Front Squat", weight: ${w} }] } : { actions: [] } } }`;
+		// Same name → same slug "shared" → same version 1 → identical un-namespaced key.
+		await a.createPlugin({ name: "shared", source: mk(111) });
+		await b.createPlugin({ name: "shared", source: mk(222) });
+		await a.firePlugins({ set: { exercise: "Front Squat", reps: 5, weight: 125 }, failed: true });
+		await b.firePlugins({ set: { exercise: "Front Squat", reps: 5, weight: 125 }, failed: true });
+		const fsOf = async (h: Awaited<ReturnType<typeof agent>>) =>
+			(await h.getProgram()).days[0].lifts.find((l: { exercise: string }) => l.exercise === "Front Squat").weight;
+		expect(await fsOf(a)).toBe(111);
+		expect(await fsOf(b)).toBe(222); // each DO ran its own isolate, not a shared cached one
+	});
+
 	// (d) Blast radius: non-whitelisted ops are dropped and no more than 3 actions apply per event.
 	it("enforces the op whitelist and the 3-action cap", async () => {
 		const a = await agent("m5-cap");
@@ -479,20 +501,20 @@ describe("liftty plan change tracking (audit trail)", () => {
 	it("attributes a plugin's change to plugin:<name> and carries its note as reason", async () => {
 		const a = await agent("chg-plugin");
 		await a.reseed();
-		// Unique plugin name (→ unique slug → unique loader cache key `plugin:<slug>:v1`). The Worker
-		// Loader cache key is NOT namespaced by DO, so reusing "auto-regulate" here would collide with
-		// another test's already-cached isolate and run its source instead of ours.
+		// Reuses the "auto-regulate" slug that other tests also use — safe because the loader cache key
+		// is now DO-namespaced (this DO runs ITS OWN source, note "cut 20% after a miss", not a sibling
+		// test's cached isolate). Before the namespace fix this returned the other test's note.
 		const source = `export default {
 			onSetLogged(event) {
 				if (event.failed) return { actions: [{ op: "setExerciseWeight", exercise: "Front Squat", weight: 100 }], note: "cut 20% after a miss" };
 				return { actions: [] };
 			}
 		}`;
-		await a.createPlugin({ name: "chg-audit-policy", source });
+		await a.createPlugin({ name: "auto-regulate", source });
 		await a.firePlugins({ set: { exercise: "Front Squat", reps: 5, weight: 125 }, failed: true });
 
 		const changes = await a.getProgramChanges(10);
-		const pluginChange = changes.find((c: { source: string }) => c.source === "plugin:chg-audit-policy");
+		const pluginChange = changes.find((c: { source: string }) => c.source === "plugin:auto-regulate");
 		expect(pluginChange).toBeTruthy();
 		expect(pluginChange.reason).toBe("cut 20% after a miss");
 	});
