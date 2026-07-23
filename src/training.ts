@@ -45,11 +45,18 @@ export type ProgramChange =
 /** adjustProgram reports exactly which exercises it touched, so the coach can report ground truth. */
 export type AdjustResult = { program: ProgramView; changed: string[] };
 
+/**
+ * Provenance for a program change, stamped at the CALL SITE (never by the model): `source` is who made
+ * the change ("coach" | "session-chip" | "plugin:<name>"), `reason` an optional human "why". Recorded
+ * on the `program_changes` audit trail so the plan's evolution is legible after the fact.
+ */
+export type ChangeMeta = { source?: string; reason?: string };
+
 export interface Training {
 	getProgram(): ProgramView;
 	getHistory(exercise?: string, limit?: number): SessionLog[];
 	logSet(set: SetInput): { activeSets: number; message: string };
-	adjustProgram(change: ProgramChange): AdjustResult;
+	adjustProgram(change: ProgramChange, meta?: ChangeMeta): AdjustResult;
 	/** Set the default rest timer (seconds) between logged sets — persists; drives the next rest_started. */
 	setRestSeconds(input: { seconds: number }): { restSeconds: number };
 }
@@ -80,6 +87,7 @@ type AdjustInput = {
 	reps?: number;
 	phase?: string;
 	goal?: string;
+	reason?: string;
 };
 
 /**
@@ -132,7 +140,7 @@ export function buildTrainingTools(t: Training & PluginAuthoring, opts?: { decoy
 		}),
 		adjustProgram: tool({
 			description:
-				"Change the program and return { program, changed } where `changed` lists the exact exercises modified — report those to the lifter (note: `setExerciseWeight`/`setExerciseScheme` match by name substring, so 'front squat' can touch several variants). op=deload cuts working weights (optional pct, default 10); op=setExerciseWeight sets weight for lifts matching `exercise`; op=setExerciseScheme sets the sets×reps scheme for lifts matching `exercise` (pass `sets` and/or `reps` — e.g. change Pull-ups from 4×6 to 3×10; works for bodyweight lifts too); op=advanceWeek bumps the week; op=setPhase sets `phase` (and optional `goal`). Respect the lifter's injury constraints when adjusting.",
+				"Change the program and return { program, changed } where `changed` lists the exact exercises modified — report those to the lifter (note: `setExerciseWeight`/`setExerciseScheme` match by name substring, so 'front squat' can touch several variants). op=deload cuts working weights (optional pct, default 10); op=setExerciseWeight sets weight for lifts matching `exercise`; op=setExerciseScheme sets the sets×reps scheme for lifts matching `exercise` (pass `sets` and/or `reps` — e.g. change Pull-ups from 4×6 to 3×10; works for bodyweight lifts too); op=advanceWeek bumps the week; op=setPhase sets `phase` (and optional `goal`). Respect the lifter's injury constraints when adjusting. ALWAYS pass a short `reason` explaining WHY — it is recorded on the plan's change history so the lifter can see why the plan moved (e.g. 'missed top set 2 sessions running').",
 			inputSchema: jsonSchema<AdjustInput>({
 				type: "object",
 				properties: {
@@ -144,26 +152,30 @@ export function buildTrainingTools(t: Training & PluginAuthoring, opts?: { decoy
 					reps: { type: "integer", minimum: 1, maximum: 100, description: "for setExerciseScheme" },
 					phase: { type: "string", description: "for setPhase" },
 					goal: { type: "string", description: "for setPhase" },
+					reason: { type: "string", description: "short human 'why' for this change — recorded on the plan's change history" },
 				},
 				required: ["op"],
 				additionalProperties: false,
 			}),
 			execute: async (c) => {
+				// `source: "coach"` is stamped here, not taken from model input — the model authors the
+				// `reason`, never the provenance. Same execute runs for tools-mode AND Code Mode.
+				const meta = { source: "coach", reason: c.reason };
 				switch (c.op) {
 					case "deload":
-						return t.adjustProgram({ op: "deload", pct: c.pct });
+						return t.adjustProgram({ op: "deload", pct: c.pct }, meta);
 					case "setExerciseWeight":
 						if (!c.exercise || c.weight == null) throw new Error("setExerciseWeight needs exercise + weight");
-						return t.adjustProgram({ op: "setExerciseWeight", exercise: c.exercise, weight: c.weight });
+						return t.adjustProgram({ op: "setExerciseWeight", exercise: c.exercise, weight: c.weight }, meta);
 					case "setExerciseScheme":
 						if (!c.exercise || (c.sets == null && c.reps == null))
 							throw new Error("setExerciseScheme needs exercise + at least one of sets/reps");
-						return t.adjustProgram({ op: "setExerciseScheme", exercise: c.exercise, sets: c.sets, reps: c.reps });
+						return t.adjustProgram({ op: "setExerciseScheme", exercise: c.exercise, sets: c.sets, reps: c.reps }, meta);
 					case "advanceWeek":
-						return t.adjustProgram({ op: "advanceWeek" });
+						return t.adjustProgram({ op: "advanceWeek" }, meta);
 					case "setPhase":
 						if (!c.phase) throw new Error("setPhase needs phase");
-						return t.adjustProgram({ op: "setPhase", phase: c.phase, goal: c.goal });
+						return t.adjustProgram({ op: "setPhase", phase: c.phase, goal: c.goal }, meta);
 					default:
 						throw new Error(`unknown op: ${(c as { op: string }).op}`);
 				}

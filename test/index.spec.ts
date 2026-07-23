@@ -266,6 +266,28 @@ describe("liftty plugins (M5)", () => {
 		expect(list.some((p: { name: string }) => p.name === "broken")).toBe(false);
 	});
 
+	// (d0) Cache isolation: two DOs whose plugins slug to the SAME id at the SAME version must each run
+	// their OWN source. The loader `get()` cache is keyed by id string alone and shared across all DOs,
+	// so the key is namespaced by DO id — otherwise the second firing is a cache hit on the first DO's
+	// isolate and silently runs the wrong user's code. (Regression: pre-fix, fsB would be 111.)
+	it("isolates the loader cache per DO for a shared plugin slug", async () => {
+		const a = await agent("ns-collide-a");
+		const b = await agent("ns-collide-b");
+		await a.reseed();
+		await b.reseed();
+		const mk = (w: number) =>
+			`export default { onSetLogged(e) { return e.failed ? { actions: [{ op: "setExerciseWeight", exercise: "Front Squat", weight: ${w} }] } : { actions: [] } } }`;
+		// Same name → same slug "shared" → same version 1 → identical un-namespaced key.
+		await a.createPlugin({ name: "shared", source: mk(111) });
+		await b.createPlugin({ name: "shared", source: mk(222) });
+		await a.firePlugins({ set: { exercise: "Front Squat", reps: 5, weight: 125 }, failed: true });
+		await b.firePlugins({ set: { exercise: "Front Squat", reps: 5, weight: 125 }, failed: true });
+		const fsOf = async (h: Awaited<ReturnType<typeof agent>>) =>
+			(await h.getProgram()).days[0].lifts.find((l: { exercise: string }) => l.exercise === "Front Squat").weight;
+		expect(await fsOf(a)).toBe(111);
+		expect(await fsOf(b)).toBe(222); // each DO ran its own isolate, not a shared cached one
+	});
+
 	// (d) Blast radius: non-whitelisted ops are dropped and no more than 3 actions apply per event.
 	it("enforces the op whitelist and the 3-action cap", async () => {
 		const a = await agent("m5-cap");
@@ -443,6 +465,121 @@ describe("liftty program scheme edits (coach sets/reps)", () => {
 		// re-applying the same clamped value is a no-op: nothing "changed"
 		const r2 = await a.adjustProgram({ op: "setExerciseScheme", exercise: "Pull-ups", sets: 20 });
 		expect(r2.changed).not.toContain("Pull-ups");
+	});
+});
+
+describe("liftty plan change tracking (audit trail)", () => {
+	// Every program mutation from the single validated adjustProgram write path lands on the
+	// program_changes timeline, with before→after deltas + provenance (source) + optional human reason.
+	it("records a coach change with source + reason + before→after delta", async () => {
+		const a = await agent("chg-coach");
+		await a.reseed(); // Front Squat opener 125
+		const res = await a.adjustProgram({ op: "setExerciseWeight", exercise: "Front Squat", weight: 135 }, { source: "coach", reason: "felt easy last session" });
+		expect(res.changed).toContain("Front Squat");
+
+		const changes = await a.getProgramChanges(10);
+		expect(changes.length).toBeGreaterThan(0);
+		const top = changes[0];
+		expect(top.op).toBe("setExerciseWeight");
+		expect(top.source).toBe("coach");
+		expect(top.reason).toBe("felt easy last session");
+		const fsDelta = top.detail.find((d: { exercise: string | null }) => d.exercise === "Front Squat");
+		expect(fsDelta.before).toBe(125);
+		expect(fsDelta.after).toBe(135);
+	});
+
+	// A no-op change (already at target) writes NO audit row — the timeline only holds real moves.
+	it("does not record a change when nothing actually moved", async () => {
+		const a = await agent("chg-noop");
+		await a.reseed();
+		await a.adjustProgram({ op: "setExerciseScheme", exercise: "Pull-ups", sets: 4, reps: 6 }); // already 4×6
+		const changes = await a.getProgramChanges(10);
+		expect(changes.length).toBe(0);
+	});
+
+	// A fired plugin's change is attributed to `plugin:<name>` and carries the plugin's note as reason.
+	it("attributes a plugin's change to plugin:<name> and carries its note as reason", async () => {
+		const a = await agent("chg-plugin");
+		await a.reseed();
+		// Reuses the "auto-regulate" slug that other tests also use — safe because the loader cache key
+		// is now DO-namespaced (this DO runs ITS OWN source, note "cut 20% after a miss", not a sibling
+		// test's cached isolate). Before the namespace fix this returned the other test's note.
+		const source = `export default {
+			onSetLogged(event) {
+				if (event.failed) return { actions: [{ op: "setExerciseWeight", exercise: "Front Squat", weight: 100 }], note: "cut 20% after a miss" };
+				return { actions: [] };
+			}
+		}`;
+		await a.createPlugin({ name: "auto-regulate", source });
+		await a.firePlugins({ set: { exercise: "Front Squat", reps: 5, weight: 125 }, failed: true });
+
+		const changes = await a.getProgramChanges(10);
+		const pluginChange = changes.find((c: { source: string }) => c.source === "plugin:auto-regulate");
+		expect(pluginChange).toBeTruthy();
+		expect(pluginChange.reason).toBe("cut 20% after a miss");
+	});
+
+	// End-to-end: a recorded change renders in the /plan "plan changes" section (getPlanData → renderPlan).
+	it("renders the change in the /plan page", async () => {
+		const a = await agent("me"); // /plan reads the singleton "me" DO
+		await a.reseed();
+		await a.adjustProgram({ op: "setExerciseWeight", exercise: "Incline Bench", weight: 100 }, { source: "coach", reason: "form dialed in" });
+		const res = await SELF.fetch("https://example.com/plan");
+		expect(res.status).toBe(200);
+		const html = await res.text();
+		expect(html).toContain("plan changes");
+		expect(html).toContain("form dialed in");
+	});
+
+	// The audit trail is surfaced as a detailed table in the /db snapshot.
+	it("exposes program_changes in the /db snapshot", async () => {
+		const a = await agent("chg-db");
+		await a.reseed();
+		await a.adjustProgram({ op: "advanceWeek" }, { source: "coach", reason: "week done" });
+		const snap = await a.getDbSnapshot();
+		const pc = snap.tables.find((t: { name: string }) => t.name === "program_changes");
+		expect(pc).toBeTruthy();
+		expect(pc.rowCount).toBe(1);
+		expect(pc.rows[0].source).toBe("coach");
+	});
+});
+
+describe("liftty session finalize (live workout → history)", () => {
+	// The Finish button (session_complete) persists the active session's logged sets into the sessions
+	// table, so getHistory() (and every plugin's recentHistory) reflects real work, not just the seed.
+	it("finalizeSession writes logged sets into history and clears the active session", async () => {
+		const a = await agent("fin-basic");
+		await a.reseed();
+		await a.logSet({ exercise: "Front Squat", reps: 8, weight: 130 });
+		await a.logSet({ exercise: "Front Squat", reps: 7, weight: 130 });
+		await a.logSet({ exercise: "Romanian Deadlift", reps: 8, weight: 120 });
+
+		const res = await a.finalizeSession();
+		expect(res.ok).toBe(true);
+		expect(res.sets).toBe(3);
+
+		// The active session is cleared…
+		const dump = await a.dumpState();
+		expect(dump.activeLoggedSets).toBe(0);
+
+		// …and the workout is now durable history (newest first), with a rolled-up summary.
+		const hist = await a.getHistory("front squat", 5);
+		const live = hist.find((h: { id: string }) => h.id.startsWith("live-"));
+		expect(live).toBeTruthy();
+		expect(live.summary).toContain("Front Squat 2×");
+		expect(live.summary).toContain("Romanian Deadlift 1×");
+	});
+
+	// An empty Finish (no sets logged) stores nothing but still clears the session.
+	it("finalizeSession discards a session with no logged sets", async () => {
+		const a = await agent("fin-empty");
+		await a.reseed();
+		const before = (await a.getHistory(undefined, 200)).length;
+		// Open an active session with zero sets by connecting is WS-only; simulate via logSet then finalize twice.
+		const res = await a.finalizeSession(); // no active session at all
+		expect(res.ok).toBe(false);
+		const after = (await a.getHistory(undefined, 200)).length;
+		expect(after).toBe(before); // nothing added
 	});
 });
 

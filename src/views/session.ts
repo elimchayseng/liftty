@@ -7,10 +7,13 @@ import { renderHead, renderHeader } from "./shared";
  *   client → server:  { type:"log_set", exercise, reps, weight?, failed?, rest? }
  *                     { type:"set_rest", seconds }                    (NEW — configurable rest default)
  *                     { type:"set_scheme", exercise, sets?, reps? }   (NEW — editable sets×reps chips)
+ *                     { type:"session_complete" }                     (NEW — Finish button → persist history)
  *   server → client:  { type:"session_hello", day, lifts, activeSession, restSeconds }
  *                     { type:"cf_agent_state", state }
  *                     { type:"set_logged", … } { type:"rest_started", exercise, seconds }
  *                     { type:"rest_over", exercise } { type:"plugin_fired", … } { type:"error", message }
+ *                     { type:"session_finalized", id, day, week, sets, summary }  (NEW — broadcast on save)
+ *                     { type:"session_complete_result", ok, … }                    (NEW — Finish ack)
  *
  * Weight is the loudest thing on the page (56px Archivo). Prescribed sets×reps are editable chips that
  * persist via set_scheme; the rest default is an editable chip that persists via set_rest. Prescribed
@@ -86,7 +89,12 @@ export function renderSession(): string {
   .receipt b, .receipt .ink { color: var(--ink); }
   .receipt.plugin { border-left-color: var(--accent); color: var(--marker); }
   .err { font-family: var(--ui); color: #ff6b6b; font-size: 12px; padding: 6px 2px; }
-  .empty { font-family: var(--ui); font-size: 12px; color: var(--faint); }`;
+  .empty { font-family: var(--ui); font-size: 12px; color: var(--faint); }
+
+  /* finish: persist the live workout into permanent history (getHistory + plugins then see it) */
+  #finish { width: 100%; margin-top: 28px; border: 1px solid var(--line-strong); background: transparent; color: var(--sub); font-family: var(--display); font-weight: 800; font-size: 13px; letter-spacing: 0.08em; padding: 16px; cursor: pointer; }
+  #finish:hover { border-color: var(--accent); color: var(--ink); }
+  #finish:disabled { opacity: 0.4; cursor: default; }`;
 
 	const live = `<span class="conn" id="conn"><span class="sq"></span><span id="connlbl">connecting</span></span>`;
 
@@ -110,6 +118,8 @@ export function renderSession(): string {
 
     <div class="slabel">receipts</div>
     <div id="receipts"><div class="empty">Log a set to see receipts.</div></div>
+
+    <button id="finish" type="button">FINISH SESSION</button>
   </div>
 
 <script>
@@ -126,6 +136,7 @@ export function renderSession(): string {
   var restNum = document.getElementById('restnum');
   var restLbl = document.getElementById('restlbl');
   var restChip = document.getElementById('restchip');
+  var finishEl = document.getElementById('finish');
 
   var ws = null;
   var restTimer = null;
@@ -161,6 +172,14 @@ export function renderSession(): string {
       if (lifts) renderLifts(lifts, latestState.activeSession);
       updateProgress(latestState ? latestState.activeSession : null);
     }, 0);
+  });
+
+  // Finish the workout: persist the active session into permanent history. Server acks with
+  // session_complete_result (and broadcasts session_finalized on success). Briefly disabled to avoid
+  // a double-tap saving twice; re-enabled once the server responds.
+  finishEl.addEventListener('click', function () {
+    finishEl.disabled = true;
+    send({ type: 'session_complete' });
   });
 
   // The editable rest-default chip persists via a set_rest frame; the next logged set rests this long.
@@ -380,6 +399,18 @@ export function renderSession(): string {
       case 'plugin_fired':
         var changed = msg.changed && msg.changed.length ? ' · adjusted ' + msg.changed.map(esc).join(', ') : ' · no change';
         addReceipt('<span class="ink">' + esc(msg.name) + '</span> fired · ' + msg.ms + ' ms · ' + (msg.cold ? 'cold' : 'warm') + ' · <span class="ink">0 tokens</span>' + changed, true);
+        break;
+      case 'session_finalized':
+        // Broadcast on a successful save — show the rolled-up summary as a receipt. The following
+        // cf_agent_state (activeSession now null) resets the per-lift progress lines to 0 on its own.
+        addReceipt('session saved · <span class="ink">' + msg.sets + ' set' + (msg.sets === 1 ? '' : 's') + '</span> · ' + esc(msg.summary || ''), false);
+        finishEl.disabled = false;
+        break;
+      case 'session_complete_result':
+        // Direct ack to THIS client. On success the receipt already came via session_finalized; only
+        // surface the "nothing to save" case here so an empty Finish tap is not silent.
+        if (!msg.ok) addErr('nothing to save' + (msg.reason ? ' · ' + msg.reason : ''));
+        finishEl.disabled = false;
         break;
       case 'error':
         addErr(msg.message || 'unknown');

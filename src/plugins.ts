@@ -32,7 +32,7 @@
  * recursion. `globalOutbound:null` + `limits:{cpuMs,subRequests:0}` = deny-by-default blast radius.
  * A throwing plugin is recorded in `last_result` and skipped — it can never break `logSet`.
  */
-import type { ProgramChange, AdjustResult, ProgramView, SessionLog } from "./training";
+import type { ProgramChange, AdjustResult, ProgramView, SessionLog, ChangeMeta } from "./training";
 import type { Lift, State } from "./server";
 
 /** The event the DO dispatches to a plugin on every logged set. Pure data — no capabilities. */
@@ -88,7 +88,16 @@ export interface PluginHost {
 		...values: (string | number | boolean | null)[]
 	): T[];
 	loader: WorkerLoader;
-	adjustProgram(change: ProgramChange): AdjustResult;
+	adjustProgram(change: ProgramChange, meta?: ChangeMeta): AdjustResult;
+	/**
+	 * A DO-unique prefix for loader cache keys. The Worker Loader's `get(id, …)` cache is keyed by the
+	 * id string ALONE and is shared across every DO in the Worker — so without this, two users whose
+	 * plugins slug to the same id at the same version (`plugin:auto-regulate:v1`) would collide, and the
+	 * second user's `get()` would be a cache HIT that runs the FIRST user's isolate/source. Prefixing
+	 * with the DO id isolates the cache per user while keeping it warm within one DO. (The single-user
+	 * "me" demo never hits this, but the audit trail makes provenance matter — so we make it correct.)
+	 */
+	namespace: string;
 }
 
 /** RPC shape the harness entrypoint exposes back to the DO. */
@@ -271,7 +280,9 @@ export async function runPlugins(host: PluginHost, event: PluginEvent): Promise<
 		let error: string | undefined;
 		let applied = 0;
 		try {
-			const stub = host.loader.get(`plugin:${row.id}:v${row.version}`, () => {
+			// Cache key is namespaced by the DO (host.namespace) so a plugin slug + version can never
+				// resolve to another user's cached isolate. `:v${version}` still invalidates on re-author.
+				const stub = host.loader.get(`${host.namespace}:plugin:${row.id}:v${row.version}`, () => {
 				cold = true; // callback fires only on cache miss — a real warm/cold signal
 				return workerCode(row.source);
 			});
@@ -282,8 +293,12 @@ export async function runPlugins(host: PluginHost, event: PluginEvent): Promise<
 
 			const actions = sanitizeActions(result?.actions);
 			applied = actions.length;
+				// The plugin's optional `note` is its own "why" — carry it onto the audit trail as the reason,
+				// stamped with `plugin:<name>` provenance (the plugin never sets its own source).
+				const reason = typeof result?.note === "string" && result.note.trim() ? result.note.trim() : undefined;
+				const meta: ChangeMeta = { source: `plugin:${row.name}`, reason };
 			for (const action of actions) {
-				const res = host.adjustProgram(action);
+				const res = host.adjustProgram(action, meta);
 				changed.push(...res.changed);
 			}
 			changed = [...new Set(changed)];
