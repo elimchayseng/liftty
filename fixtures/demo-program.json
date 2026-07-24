@@ -1,16 +1,16 @@
 {
-	"phase": "Rebuild · reaccumulation (3-day A/B/C)",
-	"goal": "Rebuild to December working weights (FS 4×7 @155 · Incline 4×6 @115 · Hang Clean 5×4 @125), then progress toward 3RM goals: FS 225 · Incline 170 · Hang Clean 185.",
+	"phase": "8-week strength block · 3-day A/B/C",
+	"goal": "Progress weeks 1–7 to a week-8 3RM retest: FS open 170 (stretch 180–185) · Incline open 140 (stretch 145–150) · Hang Clean open 140 (stretch 150–155). Long-term 3RM goals: FS 225 · Incline 170 · Hang Clean 185.",
 	"weekIndex": 1,
 	"days": [
 		{
 			"day": "Day A",
 			"focus": "Front Squat",
 			"lifts": [
-				{ "exercise": "Front Squat", "sets": 4, "reps": 8, "weight": 125, "note": "reaccumulation opener · below Dec 145 · controlled depth, brace ankle" },
+				{ "exercise": "Front Squat", "sets": 4, "reps": 8, "weight": 125 },
 				{ "exercise": "Pause Front Squat (2s)", "sets": 3, "reps": 5, "weight": 105 },
 				{ "exercise": "Romanian Deadlift", "sets": 4, "reps": 8, "weight": 115 },
-				{ "exercise": "Weighted Step-ups", "sets": 3, "reps": 8, "weight": 25, "perSide": true },
+				{ "exercise": "Weighted Step-ups", "sets": 3, "reps": 8, "weight": 35, "perSide": true, "note": "KB" },
 				{ "exercise": "Pull-ups", "sets": 4, "reps": 6 },
 				{ "exercise": "Bulgarian Split Squats", "sets": 3, "reps": 8, "weight": 30, "perSide": true },
 				{ "exercise": "Standing Calf Raises", "sets": 4, "reps": 15, "weight": 45 },
@@ -21,13 +21,15 @@
 			"day": "Day B",
 			"focus": "Incline Bench",
 			"lifts": [
-				{ "exercise": "Incline Bench", "sets": 4, "reps": 8, "weight": 95, "note": "known weak point — reps clean, leave 2 in the tank" },
-				{ "exercise": "Close-Grip Incline Press", "sets": 3, "reps": 8, "weight": 75 },
+				{ "exercise": "Incline Bench", "sets": 4, "reps": 8, "weight": 100, "note": "CALIBRATE: set at load where 8 reps = RPE 7" },
+				{ "exercise": "Close-Grip Incline", "sets": 3, "reps": 8, "weight": 80 },
 				{ "exercise": "Barbell Row", "sets": 4, "reps": 8, "weight": 95 },
 				{ "exercise": "Dips", "sets": 3, "reps": 10 },
-				{ "exercise": "Seated DB Press", "sets": 3, "reps": 10, "weight": 30, "note": "reduced load on return from layoff" },
+				{ "exercise": "Seated DB Press", "sets": 3, "reps": 10, "weight": 30 },
 				{ "exercise": "Lateral Raises", "sets": 3, "reps": 12, "weight": 15 },
 				{ "exercise": "Face Pulls", "sets": 3, "reps": 15, "weight": 30 },
+				{ "exercise": "Rear Delt Flyes", "sets": 3, "reps": 12, "weight": 15 },
+				{ "exercise": "Overhead Tricep Ext", "sets": 3, "reps": 10, "weight": 25 },
 				{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
 			]
 		},
@@ -35,11 +37,11 @@
 			"day": "Day C",
 			"focus": "Hang Clean",
 			"lifts": [
-				{ "exercise": "Hang Clean", "sets": 5, "reps": 3, "weight": 105, "note": "technique priority · stop if ankle catch flares · clean pulls only if catch degrades" },
-				{ "exercise": "Hang Clean Pulls", "sets": 4, "reps": 3, "weight": 125 },
-				{ "exercise": "Front Squat (lighter)", "sets": 3, "reps": 6, "weight": 115 },
-				{ "exercise": "Pull-ups", "sets": 4, "reps": 6 },
-				{ "exercise": "Weighted Step-ups", "sets": 3, "reps": 8, "weight": 25, "perSide": true },
+				{ "exercise": "Hang Clean", "sets": 5, "reps": 3, "weight": 95, "note": "CALIBRATE: work up in 10lb jumps until catch degrades" },
+				{ "exercise": "Hang Clean Pulls", "sets": 4, "reps": 3, "weight": 115 },
+				{ "exercise": "Front Squat (light)", "sets": 3, "reps": 6, "weight": 105 },
+				{ "exercise": "Pull-ups (varied grip)", "sets": 4, "reps": 6 },
+				{ "exercise": "Single-Leg RDL", "sets": 3, "reps": 8, "weight": 25, "perSide": true },
 				{ "exercise": "EZ Bar Curls", "sets": 3, "reps": 10, "weight": 45 },
 				{ "exercise": "Rope Pushdowns", "sets": 3, "reps": 10, "weight": 35 },
 				{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }

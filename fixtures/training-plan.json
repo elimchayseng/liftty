@@ -1,0 +1,403 @@
+{
+	"name": "8-week strength block · FS / Incline / HC (Jul–Sep 2026)",
+	"startDate": "2026-07-21",
+	"weeks": [
+		{
+			"week": 1,
+			"days": [
+				{
+					"day": "Day A",
+					"focus": "Front Squat",
+					"lifts": [
+						{ "exercise": "Front Squat", "sets": 4, "reps": 8, "weight": 125 },
+						{ "exercise": "Pause Front Squat (2s)", "sets": 3, "reps": 5, "weight": 105 },
+						{ "exercise": "Romanian Deadlift", "sets": 4, "reps": 8, "weight": 115 },
+						{ "exercise": "Weighted Step-ups", "sets": 3, "reps": 8, "weight": 35, "perSide": true, "note": "KB" },
+						{ "exercise": "Pull-ups", "sets": 4, "reps": 6 },
+						{ "exercise": "Bulgarian Split Squats", "sets": 3, "reps": 8, "weight": 30, "perSide": true },
+						{ "exercise": "Standing Calf Raises", "sets": 4, "reps": 15, "weight": 45 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				},
+				{
+					"day": "Day B",
+					"focus": "Incline Bench",
+					"lifts": [
+						{ "exercise": "Incline Bench", "sets": 4, "reps": 8, "weight": 100, "note": "CALIBRATE: set at load where 8 reps = RPE 7" },
+						{ "exercise": "Close-Grip Incline", "sets": 3, "reps": 8, "weight": 80 },
+						{ "exercise": "Barbell Row", "sets": 4, "reps": 8, "weight": 95 },
+						{ "exercise": "Dips", "sets": 3, "reps": 10 },
+						{ "exercise": "Seated DB Press", "sets": 3, "reps": 10, "weight": 30 },
+						{ "exercise": "Lateral Raises", "sets": 3, "reps": 12, "weight": 15 },
+						{ "exercise": "Face Pulls", "sets": 3, "reps": 15, "weight": 30 },
+						{ "exercise": "Rear Delt Flyes", "sets": 3, "reps": 12, "weight": 15 },
+						{ "exercise": "Overhead Tricep Ext", "sets": 3, "reps": 10, "weight": 25 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				},
+				{
+					"day": "Day C",
+					"focus": "Hang Clean",
+					"lifts": [
+						{ "exercise": "Hang Clean", "sets": 5, "reps": 3, "weight": 95, "note": "CALIBRATE: work up in 10lb jumps until catch degrades" },
+						{ "exercise": "Hang Clean Pulls", "sets": 4, "reps": 3, "weight": 115 },
+						{ "exercise": "Front Squat (light)", "sets": 3, "reps": 6, "weight": 105 },
+						{ "exercise": "Pull-ups (varied grip)", "sets": 4, "reps": 6 },
+						{ "exercise": "Single-Leg RDL", "sets": 3, "reps": 8, "weight": 25, "perSide": true },
+						{ "exercise": "EZ Bar Curls", "sets": 3, "reps": 10, "weight": 45 },
+						{ "exercise": "Rope Pushdowns", "sets": 3, "reps": 10, "weight": 35 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				}
+			]
+		},
+		{
+			"week": 2,
+			"days": [
+				{
+					"day": "Day A",
+					"focus": "Front Squat",
+					"lifts": [
+						{ "exercise": "Front Squat", "sets": 4, "reps": 8, "weight": 130 },
+						{ "exercise": "Pause Front Squat (2s)", "sets": 3, "reps": 5, "weight": 110 },
+						{ "exercise": "Romanian Deadlift", "sets": 4, "reps": 8, "weight": 125 },
+						{ "exercise": "Weighted Step-ups", "sets": 3, "reps": 8, "weight": 35, "perSide": true, "note": "KB" },
+						{ "exercise": "Pull-ups", "sets": 4, "reps": 7 },
+						{ "exercise": "Bulgarian Split Squats", "sets": 3, "reps": 8, "weight": 32.5, "perSide": true },
+						{ "exercise": "Standing Calf Raises", "sets": 4, "reps": 15, "weight": 55 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				},
+				{
+					"day": "Day B",
+					"focus": "Incline Bench",
+					"lifts": [
+						{ "exercise": "Incline Bench", "sets": 4, "reps": 8, "weight": 105 },
+						{ "exercise": "Close-Grip Incline", "sets": 3, "reps": 8, "weight": 85 },
+						{ "exercise": "Barbell Row", "sets": 4, "reps": 8, "weight": 105 },
+						{ "exercise": "Dips", "sets": 3, "reps": 10 },
+						{ "exercise": "Seated DB Press", "sets": 3, "reps": 10, "weight": 32.5 },
+						{ "exercise": "Lateral Raises", "sets": 3, "reps": 12, "weight": 17.5 },
+						{ "exercise": "Face Pulls", "sets": 3, "reps": 15, "weight": 35 },
+						{ "exercise": "Rear Delt Flyes", "sets": 3, "reps": 12, "weight": 15 },
+						{ "exercise": "Overhead Tricep Ext", "sets": 3, "reps": 10, "weight": 30 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				},
+				{
+					"day": "Day C",
+					"focus": "Hang Clean",
+					"lifts": [
+						{ "exercise": "Hang Clean", "sets": 5, "reps": 3, "weight": 105 },
+						{ "exercise": "Hang Clean Pulls", "sets": 4, "reps": 3, "weight": 125 },
+						{ "exercise": "Front Squat (light)", "sets": 3, "reps": 6, "weight": 110 },
+						{ "exercise": "Pull-ups (varied grip)", "sets": 4, "reps": 6 },
+						{ "exercise": "Single-Leg RDL", "sets": 3, "reps": 8, "weight": 30, "perSide": true },
+						{ "exercise": "EZ Bar Curls", "sets": 3, "reps": 10, "weight": 50 },
+						{ "exercise": "Rope Pushdowns", "sets": 3, "reps": 10, "weight": 40 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				}
+			]
+		},
+		{
+			"week": 3,
+			"days": [
+				{
+					"day": "Day A",
+					"focus": "Front Squat",
+					"lifts": [
+						{ "exercise": "Front Squat", "sets": 4, "reps": 8, "weight": 135 },
+						{ "exercise": "Pause Front Squat (2s)", "sets": 3, "reps": 5, "weight": 115 },
+						{ "exercise": "Romanian Deadlift", "sets": 4, "reps": 8, "weight": 135 },
+						{ "exercise": "Weighted Step-ups", "sets": 3, "reps": 8, "weight": 40, "perSide": true, "note": "KB" },
+						{ "exercise": "Pull-ups", "sets": 4, "reps": 8 },
+						{ "exercise": "Bulgarian Split Squats", "sets": 3, "reps": 8, "weight": 35, "perSide": true },
+						{ "exercise": "Standing Calf Raises", "sets": 4, "reps": 15, "weight": 65 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				},
+				{
+					"day": "Day B",
+					"focus": "Incline Bench",
+					"lifts": [
+						{ "exercise": "Incline Bench", "sets": 4, "reps": 8, "weight": 110 },
+						{ "exercise": "Close-Grip Incline", "sets": 3, "reps": 8, "weight": 90 },
+						{ "exercise": "Barbell Row", "sets": 4, "reps": 8, "weight": 110 },
+						{ "exercise": "Dips", "sets": 3, "reps": 10 },
+						{ "exercise": "Seated DB Press", "sets": 3, "reps": 10, "weight": 35 },
+						{ "exercise": "Lateral Raises", "sets": 3, "reps": 12, "weight": 20 },
+						{ "exercise": "Face Pulls", "sets": 3, "reps": 15, "weight": 35 },
+						{ "exercise": "Rear Delt Flyes", "sets": 3, "reps": 12, "weight": 17.5 },
+						{ "exercise": "Overhead Tricep Ext", "sets": 3, "reps": 10, "weight": 30 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				},
+				{
+					"day": "Day C",
+					"focus": "Hang Clean",
+					"lifts": [
+						{ "exercise": "Hang Clean", "sets": 5, "reps": 3, "weight": 110 },
+						{ "exercise": "Hang Clean Pulls", "sets": 4, "reps": 3, "weight": 130 },
+						{ "exercise": "Front Squat (light)", "sets": 3, "reps": 6, "weight": 115 },
+						{ "exercise": "Pull-ups (varied grip)", "sets": 4, "reps": 7 },
+						{ "exercise": "Single-Leg RDL", "sets": 3, "reps": 8, "weight": 30, "perSide": true },
+						{ "exercise": "EZ Bar Curls", "sets": 3, "reps": 10, "weight": 50 },
+						{ "exercise": "Rope Pushdowns", "sets": 3, "reps": 10, "weight": 40 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				}
+			]
+		},
+		{
+			"week": 4,
+			"days": [
+				{
+					"day": "Day A",
+					"focus": "Front Squat",
+					"lifts": [
+						{ "exercise": "Front Squat", "sets": 5, "reps": 5, "weight": 145 },
+						{ "exercise": "Pause Front Squat (2s)", "sets": 3, "reps": 4, "weight": 120 },
+						{ "exercise": "Romanian Deadlift", "sets": 4, "reps": 6, "weight": 145 },
+						{ "exercise": "Weighted Step-ups", "sets": 3, "reps": 6, "weight": 40, "perSide": true, "note": "KB" },
+						{ "exercise": "Pull-ups", "sets": 4, "reps": 6, "addedWeight": 10 },
+						{ "exercise": "Bulgarian Split Squats", "sets": 3, "reps": 6, "weight": 37.5, "perSide": true },
+						{ "exercise": "Standing Calf Raises", "sets": 4, "reps": 12, "weight": 75 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				},
+				{
+					"day": "Day B",
+					"focus": "Incline Bench",
+					"lifts": [
+						{ "exercise": "Incline Bench", "sets": 5, "reps": 5, "weight": 118 },
+						{ "exercise": "Close-Grip Incline", "sets": 4, "reps": 5, "weight": 95 },
+						{ "exercise": "Barbell Row", "sets": 4, "reps": 6, "weight": 118 },
+						{ "exercise": "Dips", "sets": 3, "reps": 10, "addedWeight": 10 },
+						{ "exercise": "Seated DB Press", "sets": 3, "reps": 6, "weight": 37.5 },
+						{ "exercise": "Lateral Raises", "sets": 3, "reps": 8, "weight": 20 },
+						{ "exercise": "Face Pulls", "sets": 3, "reps": 10, "weight": 40 },
+						{ "exercise": "Rear Delt Flyes", "sets": 3, "reps": 8, "weight": 20 },
+						{ "exercise": "Overhead Tricep Ext", "sets": 3, "reps": 8, "weight": 35 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				},
+				{
+					"day": "Day C",
+					"focus": "Hang Clean",
+					"lifts": [
+						{ "exercise": "Hang Clean", "sets": 6, "reps": 3, "weight": 120 },
+						{ "exercise": "Hang Clean Pulls", "sets": 4, "reps": 3, "weight": 140 },
+						{ "exercise": "Front Squat (light)", "sets": 3, "reps": 6, "weight": 120 },
+						{ "exercise": "Pull-ups (varied grip)", "sets": 4, "reps": 7 },
+						{ "exercise": "Single-Leg RDL", "sets": 3, "reps": 8, "weight": 35, "perSide": true },
+						{ "exercise": "EZ Bar Curls", "sets": 3, "reps": 8, "weight": 55 },
+						{ "exercise": "Rope Pushdowns", "sets": 3, "reps": 8, "weight": 45 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				}
+			]
+		},
+		{
+			"week": 5,
+			"days": [
+				{
+					"day": "Day A",
+					"focus": "Front Squat",
+					"lifts": [
+						{ "exercise": "Front Squat", "sets": 5, "reps": 5, "weight": 150 },
+						{ "exercise": "Pause Front Squat (2s)", "sets": 3, "reps": 4, "weight": 125 },
+						{ "exercise": "Romanian Deadlift", "sets": 4, "reps": 6, "weight": 155 },
+						{ "exercise": "Weighted Step-ups", "sets": 3, "reps": 6, "weight": 45, "perSide": true, "note": "KB" },
+						{ "exercise": "Pull-ups", "sets": 4, "reps": 6, "addedWeight": 10 },
+						{ "exercise": "Bulgarian Split Squats", "sets": 3, "reps": 6, "weight": 40, "perSide": true },
+						{ "exercise": "Standing Calf Raises", "sets": 4, "reps": 12, "weight": 85 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				},
+				{
+					"day": "Day B",
+					"focus": "Incline Bench",
+					"lifts": [
+						{ "exercise": "Incline Bench", "sets": 5, "reps": 5, "weight": 123 },
+						{ "exercise": "Close-Grip Incline", "sets": 4, "reps": 5, "weight": 100 },
+						{ "exercise": "Barbell Row", "sets": 4, "reps": 6, "weight": 123 },
+						{ "exercise": "Dips", "sets": 3, "reps": 10, "addedWeight": 10 },
+						{ "exercise": "Seated DB Press", "sets": 3, "reps": 6, "weight": 40 },
+						{ "exercise": "Lateral Raises", "sets": 3, "reps": 8, "weight": 22.5 },
+						{ "exercise": "Face Pulls", "sets": 3, "reps": 10, "weight": 45 },
+						{ "exercise": "Rear Delt Flyes", "sets": 3, "reps": 8, "weight": 20 },
+						{ "exercise": "Overhead Tricep Ext", "sets": 3, "reps": 8, "weight": 35 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				},
+				{
+					"day": "Day C",
+					"focus": "Hang Clean",
+					"lifts": [
+						{ "exercise": "Hang Clean", "sets": 6, "reps": 3, "weight": 125 },
+						{ "exercise": "Hang Clean Pulls", "sets": 4, "reps": 3, "weight": 145 },
+						{ "exercise": "Front Squat (light)", "sets": 3, "reps": 6, "weight": 125 },
+						{ "exercise": "Pull-ups (varied grip)", "sets": 4, "reps": 8 },
+						{ "exercise": "Single-Leg RDL", "sets": 3, "reps": 8, "weight": 35, "perSide": true },
+						{ "exercise": "EZ Bar Curls", "sets": 3, "reps": 8, "weight": 55 },
+						{ "exercise": "Rope Pushdowns", "sets": 3, "reps": 8, "weight": 45 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				}
+			]
+		},
+		{
+			"week": 6,
+			"days": [
+				{
+					"day": "Day A",
+					"focus": "Front Squat",
+					"lifts": [
+						{ "exercise": "Front Squat", "sets": 5, "reps": 5, "weight": 155 },
+						{ "exercise": "Pause Front Squat (2s)", "sets": 3, "reps": 4, "weight": 130 },
+						{ "exercise": "Romanian Deadlift", "sets": 4, "reps": 6, "weight": 165 },
+						{ "exercise": "Weighted Step-ups", "sets": 3, "reps": 6, "weight": 45, "perSide": true, "note": "KB" },
+						{ "exercise": "Pull-ups", "sets": 4, "reps": 5, "addedWeight": 15 },
+						{ "exercise": "Bulgarian Split Squats", "sets": 3, "reps": 6, "weight": 40, "perSide": true },
+						{ "exercise": "Standing Calf Raises", "sets": 4, "reps": 12, "weight": 95 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				},
+				{
+					"day": "Day B",
+					"focus": "Incline Bench",
+					"lifts": [
+						{ "exercise": "Incline Bench", "sets": 5, "reps": 5, "weight": 128 },
+						{ "exercise": "Close-Grip Incline", "sets": 4, "reps": 5, "weight": 105 },
+						{ "exercise": "Barbell Row", "sets": 4, "reps": 6, "weight": 128 },
+						{ "exercise": "Dips", "sets": 3, "reps": 10, "addedWeight": 15 },
+						{ "exercise": "Seated DB Press", "sets": 3, "reps": 6, "weight": 40 },
+						{ "exercise": "Lateral Raises", "sets": 3, "reps": 8, "weight": 22.5 },
+						{ "exercise": "Face Pulls", "sets": 3, "reps": 10, "weight": 45 },
+						{ "exercise": "Rear Delt Flyes", "sets": 3, "reps": 8, "weight": 22.5 },
+						{ "exercise": "Overhead Tricep Ext", "sets": 3, "reps": 8, "weight": 40 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				},
+				{
+					"day": "Day C",
+					"focus": "Hang Clean",
+					"lifts": [
+						{ "exercise": "Hang Clean", "sets": 6, "reps": 3, "weight": 130 },
+						{ "exercise": "Hang Clean Pulls", "sets": 4, "reps": 3, "weight": 155 },
+						{ "exercise": "Front Squat (light)", "sets": 3, "reps": 6, "weight": 130 },
+						{ "exercise": "Pull-ups (varied grip)", "sets": 4, "reps": 8 },
+						{ "exercise": "Single-Leg RDL", "sets": 3, "reps": 8, "weight": 40, "perSide": true },
+						{ "exercise": "EZ Bar Curls", "sets": 3, "reps": 8, "weight": 60 },
+						{ "exercise": "Rope Pushdowns", "sets": 3, "reps": 8, "weight": 50 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				}
+			]
+		},
+		{
+			"week": 7,
+			"days": [
+				{
+					"day": "Day A",
+					"focus": "Front Squat",
+					"lifts": [
+						{ "exercise": "Front Squat", "sets": 5, "reps": 3, "weight": 165 },
+						{ "exercise": "Pause Front Squat (2s)", "sets": 3, "reps": 3, "weight": 140 },
+						{ "exercise": "Romanian Deadlift", "sets": 3, "reps": 5, "weight": 175 },
+						{ "exercise": "Weighted Step-ups", "sets": 3, "reps": 5, "weight": 50, "perSide": true, "note": "KB" },
+						{ "exercise": "Pull-ups", "sets": 4, "reps": 4, "addedWeight": 20 },
+						{ "exercise": "Bulgarian Split Squats", "sets": 3, "reps": 5, "weight": 45, "perSide": true },
+						{ "exercise": "Standing Calf Raises", "sets": 4, "reps": 10, "weight": 105 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				},
+				{
+					"day": "Day B",
+					"focus": "Incline Bench",
+					"lifts": [
+						{ "exercise": "Incline Bench", "sets": 5, "reps": 3, "weight": 138 },
+						{ "exercise": "Close-Grip Incline", "sets": 4, "reps": 5, "weight": 112 },
+						{ "exercise": "Barbell Row", "sets": 4, "reps": 6, "weight": 138 },
+						{ "exercise": "Dips", "sets": 3, "reps": 10, "addedWeight": 20 },
+						{ "exercise": "Seated DB Press", "sets": 3, "reps": 6, "weight": 45 },
+						{ "exercise": "Lateral Raises", "sets": 3, "reps": 8, "weight": 25 },
+						{ "exercise": "Face Pulls", "sets": 3, "reps": 10, "weight": 50 },
+						{ "exercise": "Rear Delt Flyes", "sets": 3, "reps": 8, "weight": 25 },
+						{ "exercise": "Overhead Tricep Ext", "sets": 3, "reps": 8, "weight": 45 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				},
+				{
+					"day": "Day C",
+					"focus": "Hang Clean",
+					"lifts": [
+						{ "exercise": "Hang Clean", "sets": 6, "reps": 2, "weight": 140 },
+						{ "exercise": "Hang Clean Pulls", "sets": 4, "reps": 3, "weight": 165 },
+						{ "exercise": "Front Squat (light)", "sets": 3, "reps": 6, "weight": 135 },
+						{ "exercise": "Pull-ups (varied grip)", "sets": 4, "reps": 6 },
+						{ "exercise": "Single-Leg RDL", "sets": 3, "reps": 8, "weight": 40, "perSide": true },
+						{ "exercise": "EZ Bar Curls", "sets": 3, "reps": 8, "weight": 65 },
+						{ "exercise": "Rope Pushdowns", "sets": 3, "reps": 8, "weight": 55 },
+						{ "exercise": "Core Circuit", "sets": 3, "reps": 0, "kind": "rounds" }
+					]
+				}
+			]
+		},
+		{
+			"week": 8,
+			"label": "RETEST",
+			"days": [
+				{
+					"day": "Day A",
+					"focus": "Front Squat",
+					"lifts": [
+						{
+							"exercise": "Front Squat 3RM Test",
+							"sets": 3,
+							"reps": 3,
+							"weight": 170,
+							"note": "open 170 · stretch 180–185 · up to 3 attempts, 4 min rest · warm-up: bar×8 / 40%×5 / 60%×3 / 75%×2 / 85%×1, then 4 min before first attempt"
+						},
+						{ "exercise": "Romanian Deadlift", "sets": 3, "reps": 8, "note": "light" },
+						{ "exercise": "Pull-ups", "sets": 3, "reps": 5 },
+						{ "exercise": "Core Circuit", "sets": 2, "reps": 0, "kind": "rounds" }
+					]
+				},
+				{
+					"day": "Day B",
+					"focus": "Incline Bench",
+					"lifts": [
+						{
+							"exercise": "Incline Bench 3RM Test",
+							"sets": 3,
+							"reps": 3,
+							"weight": 140,
+							"note": "open 140 · stretch 145–150 · up to 3 attempts, 4 min rest · warm-up: bar×8 / 40%×5 / 60%×3 / 75%×2 / 85%×1, then 4 min before first attempt"
+						},
+						{ "exercise": "Barbell Row", "sets": 3, "reps": 8, "note": "light" },
+						{ "exercise": "Face Pulls", "sets": 3, "reps": 15, "note": "light" },
+						{ "exercise": "Core Circuit", "sets": 2, "reps": 0, "kind": "rounds" }
+					]
+				},
+				{
+					"day": "Day C",
+					"focus": "Hang Clean",
+					"lifts": [
+						{
+							"exercise": "Hang Clean 3RM Test",
+							"sets": 3,
+							"reps": 3,
+							"weight": 140,
+							"note": "open 140 · stretch 150–155 · stop if catch degrades · warm-up: bar×8 / 40%×5 / 60%×3 / 75%×2 / 85%×1, then 4 min before first attempt"
+						},
+						{ "exercise": "Front Squat (light)", "sets": 2, "reps": 6, "note": "light" },
+						{ "exercise": "Pull-ups", "sets": 3, "reps": 5 },
+						{ "exercise": "Core Circuit", "sets": 2, "reps": 0, "kind": "rounds" }
+					]
+				}
+			]
+		}
+	]
+}

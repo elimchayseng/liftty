@@ -19,6 +19,7 @@ import {
 	type ProgramChange,
 	type AdjustResult,
 	type ChangeMeta,
+	type TrainingPlanView,
 } from "./training";
 import {
 	createPlugin as createPluginImpl,
@@ -28,7 +29,7 @@ import {
 	type PluginRow,
 	type PluginEvent,
 } from "./plugins";
-import { DEMO_PROGRAM, AUTO_REGULATE_SOURCE } from "../fixtures";
+import { DEMO_PROGRAM, TRAINING_PLAN, AUTO_REGULATE_SOURCE } from "../fixtures";
 
 /**
  * liftty — a stateful lifting coach.
@@ -38,9 +39,11 @@ import { DEMO_PROGRAM, AUTO_REGULATE_SOURCE } from "../fixtures";
  *   - Agent state (setState): lifter · program · activeSession  → hot, auto-persisted, WS-broadcast
  *   - Embedded SQLite (this.sql): sessions → append-only history
  *
- * SOURCE OF TRUTH: the seed below is derived by hand from two files committed in this repo —
- *   - prev-coach-handoff.md  (athlete profile, injuries, 3RM goals, detraining status)
- *   - workout-log.csv        (the last real training block, Dec 2025 – Jan 2026)
+ * SOURCE OF TRUTH: the seed below is derived from files committed in this repo —
+ *   - prev-coach-handoff.md          (athlete profile, injuries, 3RM goals)
+ *   - workout-log.csv                (the last real training block, Dec 2025 – Jan 2026 → seed history)
+ *   - fixtures/training-plan.json    (the committed 8-week block; program seeds from its week 1 and
+ *                                     advanceWeek loads each later week — see fixtures/eight-week-plan.csv)
  * Seeding is ONE-TIME, gated by SEED_VERSION in the `meta` table — so program edits (M2) persist
  * and never get clobbered on wake. Bump SEED_VERSION to intentionally re-seed.
  */
@@ -51,6 +54,7 @@ export type Lift = {
 	sets: number;
 	reps: number;
 	weight?: number; // lb; omitted for bodyweight work
+	addedWeight?: number; // lb added to bodyweight (weighted pull-ups/dips) — renders "BW+10"; logged weight = the added load
 	perSide?: boolean; // load/reps are per side (step-ups, split squats)
 	kind?: "rounds"; // circuit measured in rounds, not sets×reps
 	note?: string;
@@ -98,8 +102,8 @@ export type State = {
 	};
 };
 
-// --- Seed derived from prev-coach-handoff.md + workout-log.csv ---
-const SEED_VERSION = 1;
+// --- Seed derived from prev-coach-handoff.md + fixtures/eight-week-plan.csv (the committed block) ---
+const SEED_VERSION = 2; // v2: adopt the 8-week Jul–Sep 2026 block (program now derives from TRAINING_PLAN week 1)
 
 const SEED_STATE: State = {
 	lifter: {
@@ -108,65 +112,24 @@ const SEED_STATE: State = {
 		bodyweight: 160,
 		diet: "vegetarian (160g protein training days / 128g rest)",
 		status:
-			"Detrained after several endurance-focused blocks. December numbers are stale — retest pending. This block reaccumulates conservatively toward December working weights before chasing 3RM goals.",
+			"Rebuilt base after the spring layoff; running the committed 8-week block (volume weeks 1–3, transition 4–6, intensity 7, 3RM retest week 8). Week 1 calibrates Incline (8 reps = RPE 7) and Hang Clean (work up until catch degrades).",
 		injuries: [
 			"Right ankle: torn lateral ligaments (rehabbed). Residual inversion sensitivity flares on deep front squat + hang clean catch — brace and back off if it flares.",
 			"Prior 3-week illness earlier in the year cost strength.",
 		],
 		mains: [
 			{ name: "Front Squat", goal3RM: 225, decemberBest: "4×7 @ 155 (+ pause 135×5)", rebuildOpener: 125 },
-			{ name: "Incline Bench", goal3RM: 170, decemberBest: "4×5–6 @ 115 (weak point)", rebuildOpener: 95 },
-			{ name: "Hang Clean", goal3RM: 185, decemberBest: "5×4 @ 125", rebuildOpener: 105 },
+			{ name: "Incline Bench", goal3RM: 170, decemberBest: "4×5–6 @ 115 (weak point)", rebuildOpener: 100 },
+			{ name: "Hang Clean", goal3RM: 185, decemberBest: "5×4 @ 125", rebuildOpener: 95 },
 		],
 	},
 	program: {
-		phase: "Rebuild · reaccumulation (3-day A/B/C)",
-		goal: "Rebuild to December working weights (FS 4×7 @155 · Incline 4×6 @115 · Hang Clean 5×4 @125), then progress toward 3RM goals: FS 225 · Incline 170 · Hang Clean 185.",
+		phase: "8-week strength block · 3-day A/B/C",
+		goal: "Progress weeks 1–7 to a week-8 3RM retest: FS open 170 (stretch 180–185) · Incline open 140 (stretch 145–150) · Hang Clean open 140 (stretch 150–155). Long-term 3RM goals: FS 225 · Incline 170 · Hang Clean 185.",
 		weekIndex: 1,
-		days: [
-			{
-				day: "Day A",
-				focus: "Front Squat",
-				lifts: [
-					{ exercise: "Front Squat", sets: 4, reps: 8, weight: 125, note: "reaccumulation opener · below Dec 145 · controlled depth, brace ankle" },
-					{ exercise: "Pause Front Squat (2s)", sets: 3, reps: 5, weight: 105 },
-					{ exercise: "Romanian Deadlift", sets: 4, reps: 8, weight: 115 },
-					{ exercise: "Weighted Step-ups", sets: 3, reps: 8, weight: 25, perSide: true },
-					{ exercise: "Pull-ups", sets: 4, reps: 6 },
-					{ exercise: "Bulgarian Split Squats", sets: 3, reps: 8, weight: 30, perSide: true },
-					{ exercise: "Standing Calf Raises", sets: 4, reps: 15, weight: 45 },
-					{ exercise: "Core Circuit", sets: 3, reps: 0, kind: "rounds" },
-				],
-			},
-			{
-				day: "Day B",
-				focus: "Incline Bench",
-				lifts: [
-					{ exercise: "Incline Bench", sets: 4, reps: 8, weight: 95, note: "known weak point — reps clean, leave 2 in the tank" },
-					{ exercise: "Close-Grip Incline Press", sets: 3, reps: 8, weight: 75 },
-					{ exercise: "Barbell Row", sets: 4, reps: 8, weight: 95 },
-					{ exercise: "Dips", sets: 3, reps: 10 },
-					{ exercise: "Seated DB Press", sets: 3, reps: 10, weight: 30, note: "reduced load on return from layoff" },
-					{ exercise: "Lateral Raises", sets: 3, reps: 12, weight: 15 },
-					{ exercise: "Face Pulls", sets: 3, reps: 15, weight: 30 },
-					{ exercise: "Core Circuit", sets: 3, reps: 0, kind: "rounds" },
-				],
-			},
-			{
-				day: "Day C",
-				focus: "Hang Clean",
-				lifts: [
-					{ exercise: "Hang Clean", sets: 5, reps: 3, weight: 105, note: "technique priority · stop if ankle catch flares · clean pulls only if catch degrades" },
-					{ exercise: "Hang Clean Pulls", sets: 4, reps: 3, weight: 125 },
-					{ exercise: "Front Squat (lighter)", sets: 3, reps: 6, weight: 115 },
-					{ exercise: "Pull-ups", sets: 4, reps: 6 },
-					{ exercise: "Weighted Step-ups", sets: 3, reps: 8, weight: 25, perSide: true },
-					{ exercise: "EZ Bar Curls", sets: 3, reps: 10, weight: 45 },
-					{ exercise: "Rope Pushdowns", sets: 3, reps: 10, weight: 35 },
-					{ exercise: "Core Circuit", sets: 3, reps: 0, kind: "rounds" },
-				],
-			},
-		],
+		// The working copy starts as plan week 1 — the committed plan (fixtures/training-plan.json) is
+		// the source of truth for every week's prescriptions; advanceWeek loads each next week from it.
+		days: structuredClone(TRAINING_PLAN.weeks[0].days),
 	},
 	activeSession: null,
 	settings: { restSeconds: 60 },
@@ -222,6 +185,17 @@ function summarizeSets(sets: { exercise: string; reps: number; weight: number }[
 		.join(" · ");
 }
 
+/**
+ * One-line prescription for a lift — "4×8 @ 125", "3×8 @ 30/side", "4×6 @ BW+10", "3 rounds", "4×6".
+ * Used for the composite before→after strings in advanceWeek's audit deltas (a plan-week load can move
+ * sets, reps, AND weight at once, so a single weight number can't describe the change).
+ */
+function liftBrief(l: Lift): string {
+	const scheme = l.kind === "rounds" ? `${l.sets} rounds` : `${l.sets}×${l.reps}`;
+	const load = l.weight != null ? ` @ ${l.weight}${l.perSide ? "/side" : ""}` : l.addedWeight != null ? ` @ BW+${l.addedWeight}` : "";
+	return scheme + load;
+}
+
 /** One shaped table in the /db read-only snapshot. `rows`/`columns` empty for count-only tables. */
 export type DbTable = { name: string; rowCount: number; columns: string[]; rows: Record<string, unknown>[] };
 
@@ -247,7 +221,8 @@ Speak plainly, reference the lifter's real numbers, and never invent PRs.
 
 Lifter: ${L.height}, ${L.bodyweight} lb, ${L.diet}.
 Status: ${L.status}
-Current block: ${s.program.phase} (week ${s.program.weekIndex}) — ${s.program.goal}
+Current block: ${s.program.phase} (week ${s.program.weekIndex} of ${TRAINING_PLAN.weeks.length}; the final plan week is a 3RM RETEST) — ${s.program.goal}
+The block follows a committed week-by-week plan: advancing the week loads that week's prescriptions.
 Goals: ${goals}
 
 Injury constraints — RESPECT THESE. Do not program or encourage contraindicated work:
@@ -384,6 +359,21 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 		};
 	}
 
+	/**
+	 * Read the committed multi-week plan (fixtures/training-plan.json) — immutable reference data the
+	 * live program is progressed from. `week` filters to a single plan week so the coach can answer
+	 * "what's week 5?" without pulling the whole block into context.
+	 */
+	getTrainingPlan(week?: number): TrainingPlanView {
+		const weeks = week != null ? TRAINING_PLAN.weeks.filter((w) => w.week === week) : TRAINING_PLAN.weeks;
+		return {
+			name: TRAINING_PLAN.name,
+			currentWeek: this.state.program.weekIndex,
+			totalWeeks: TRAINING_PLAN.weeks.length,
+			weeks,
+		};
+	}
+
 	getHistory(exercise?: string, limit = 10): SessionLog[] {
 		const rows = this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 200`;
 		const logs = rows.map((r): SessionLog => {
@@ -449,8 +439,15 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 				for (const d of program.days)
 					for (const l of d.lifts)
 						if (l.exercise.toLowerCase().includes(q)) {
-							if (l.weight !== weight) deltas.push({ exercise: l.exercise, before: l.weight ?? null, after: weight });
-							l.weight = weight;
+							// BW+X lifts (weighted pull-ups/dips) carry their load in addedWeight, not weight —
+							// "set weighted pull-ups to 15" must move the added load, not turn BW work into a 15 lb lift.
+							if (l.weight == null && l.addedWeight != null) {
+								if (l.addedWeight !== weight) deltas.push({ exercise: l.exercise, before: l.addedWeight, after: weight });
+								l.addedWeight = weight;
+							} else {
+								if (l.weight !== weight) deltas.push({ exercise: l.exercise, before: l.weight ?? null, after: weight });
+								l.weight = weight;
+							}
 						}
 				summary =
 					deltas.length === 1 ? `${deltas[0].exercise} → ${weight} lb` : `${deltas.length} lift${deltas.length === 1 ? "" : "s"} → ${weight} lb`;
@@ -492,7 +489,30 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 				const before = program.weekIndex;
 				program.weekIndex += 1;
 				deltas.push({ exercise: null, before, after: program.weekIndex });
-				summary = `advance to week ${program.weekIndex}`;
+				// The committed plan drives progression: entering a plan week loads its prescriptions
+				// wholesale. In-week coach/plugin overrides are overwritten BY DESIGN — the per-lift
+				// composite deltas below (override as `before`, plan as `after`) keep that legible on the
+				// audit trail. Past the last plan week the days are left untouched.
+				const planWeek = TRAINING_PLAN.weeks.find((w) => w.week === program.weekIndex);
+				if (planWeek) {
+					const oldDays = program.days;
+					program.days = structuredClone(planWeek.days) as PrescribedDay[];
+					for (const d of program.days) {
+						const old = oldDays.find((o) => o.day === d.day);
+						for (const l of d.lifts) {
+							const prev = old?.lifts.find((o) => o.exercise === l.exercise);
+							const beforeBrief = prev ? liftBrief(prev) : null;
+							if (beforeBrief !== liftBrief(l)) deltas.push({ exercise: l.exercise, before: beforeBrief, after: liftBrief(l) });
+						}
+						for (const o of old?.lifts ?? [])
+							if (!d.lifts.some((l) => l.exercise === o.exercise)) deltas.push({ exercise: o.exercise, before: liftBrief(o), after: null });
+					}
+					program.phase = program.phase.replace(/ · deload wk$/, "");
+					const moved = deltas.length - 1;
+					summary = `advance to week ${program.weekIndex}${planWeek.label ? ` · ${planWeek.label}` : ""} · plan loaded (${moved} lift${moved === 1 ? "" : "s"} changed)`;
+				} else {
+					summary = `advance to week ${program.weekIndex} · beyond plan — days unchanged`;
+				}
 				break;
 			}
 			case "setPhase": {
@@ -564,9 +584,13 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 		const summary = summarizeSets(active.loggedSets);
 		const week = this.state.program.weekIndex;
 		const actuals = JSON.stringify({ focus: active.day, summary, week, day: day?.day ?? "", loggedSets: active.loggedSets });
+		// Snapshot what the program prescribed for this day, so history rows carry plan-vs-actual. This is
+		// the program AT FINALIZE TIME — a mid-session plugin/coach adjustment shows up here, which is the
+		// honest record of what the lifter was being asked to do when they hit Finish.
+		const prescribed = JSON.stringify(day ? { week, day: day.day, focus: day.focus, lifts: day.lifts } : {});
 		this.sql`INSERT INTO sessions (id, date, status, prescribed, actuals)
-			VALUES (${id}, ${date}, ${"completed"}, ${"{}"}, ${actuals})
-			ON CONFLICT(id) DO UPDATE SET date = excluded.date, status = excluded.status, actuals = excluded.actuals`;
+			VALUES (${id}, ${date}, ${"completed"}, ${prescribed}, ${actuals})
+			ON CONFLICT(id) DO UPDATE SET date = excluded.date, status = excluded.status, prescribed = excluded.prescribed, actuals = excluded.actuals`;
 		const sets = active.loggedSets.length;
 		this.setState({ ...this.state, activeSession: null });
 		this.broadcast(JSON.stringify({ type: "session_finalized", id, day: active.day, week, sets, summary }));
@@ -1184,15 +1208,30 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 	}
 
 	/** RPC: everything the /plan view needs, in one round-trip. */
-	async getPlanData(): Promise<{ state: State; recentSessions: SessionRow[]; today: number; plugins: PluginSummary[]; recentChanges: ProgramChangeRow[] }> {
+	async getPlanData(): Promise<{
+		state: State;
+		recentSessions: SessionRow[];
+		today: number;
+		plugins: PluginSummary[];
+		recentChanges: ProgramChangeRow[];
+		plan: { totalWeeks: number; label?: string; nextWeekDays?: PrescribedDay[] };
+	}> {
 		const recentSessions = this.sql<SessionRow>`
 			SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 10`;
+		const weekIndex = this.state.program.weekIndex;
+		const thisWeek = TRAINING_PLAN.weeks.find((w) => w.week === weekIndex);
+		const nextWeek = TRAINING_PLAN.weeks.find((w) => w.week === weekIndex + 1);
 		return {
 			state: this.state,
 			recentSessions,
 			today: todayIndex(this.state.program.days, recentSessions),
 			plugins: this.listPlugins(),
 			recentChanges: this.getProgramChanges(12),
+			plan: {
+				totalWeeks: TRAINING_PLAN.weeks.length,
+				...(thisWeek?.label ? { label: thisWeek.label } : {}),
+				...(nextWeek ? { nextWeekDays: nextWeek.days } : {}),
+			},
 		};
 	}
 
