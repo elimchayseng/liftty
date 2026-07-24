@@ -46,6 +46,18 @@ export type ProgramChange =
 export type AdjustResult = { program: ProgramView; changed: string[] };
 
 /**
+ * Read view of the committed multi-week training plan (fixtures/training-plan.json). Immutable
+ * reference data — the live program is the mutable working copy; advanceWeek loads the next plan
+ * week's days into it. `weeks` is filtered to one week when the caller passes one (token-bounding).
+ */
+export type TrainingPlanView = {
+	name: string;
+	currentWeek: number;
+	totalWeeks: number;
+	weeks: { week: number; label?: string; days: PrescribedDay[] }[];
+};
+
+/**
  * Provenance for a program change, stamped at the CALL SITE (never by the model): `source` is who made
  * the change ("coach" | "session-chip" | "plugin:<name>"), `reason` an optional human "why". Recorded
  * on the `program_changes` audit trail so the plan's evolution is legible after the fact.
@@ -59,6 +71,8 @@ export interface Training {
 	adjustProgram(change: ProgramChange, meta?: ChangeMeta): AdjustResult;
 	/** Set the default rest timer (seconds) between logged sets — persists; drives the next rest_started. */
 	setRestSeconds(input: { seconds: number }): { restSeconds: number };
+	/** Read the committed multi-week plan (optionally one week) — reference data, not the live program. */
+	getTrainingPlan(week?: number): TrainingPlanView;
 }
 
 /** M5: plugin authoring surface. Kept separate from Training so the four-method centerpiece stays clean. */
@@ -140,7 +154,7 @@ export function buildTrainingTools(t: Training & PluginAuthoring, opts?: { decoy
 		}),
 		adjustProgram: tool({
 			description:
-				"Change the program and return { program, changed } where `changed` lists the exact exercises modified — report those to the lifter (note: `setExerciseWeight`/`setExerciseScheme` match by name substring, so 'front squat' can touch several variants). op=deload cuts working weights (optional pct, default 10); op=setExerciseWeight sets weight for lifts matching `exercise`; op=setExerciseScheme sets the sets×reps scheme for lifts matching `exercise` (pass `sets` and/or `reps` — e.g. change Pull-ups from 4×6 to 3×10; works for bodyweight lifts too); op=advanceWeek bumps the week; op=setPhase sets `phase` (and optional `goal`). Respect the lifter's injury constraints when adjusting. ALWAYS pass a short `reason` explaining WHY — it is recorded on the plan's change history so the lifter can see why the plan moved (e.g. 'missed top set 2 sessions running').",
+				"Change the program and return { program, changed } where `changed` lists the exact exercises modified — report those to the lifter (note: `setExerciseWeight`/`setExerciseScheme` match by name substring, so 'front squat' can touch several variants). op=deload cuts working weights (optional pct, default 10); op=setExerciseWeight sets weight for lifts matching `exercise`; op=setExerciseScheme sets the sets×reps scheme for lifts matching `exercise` (pass `sets` and/or `reps` — e.g. change Pull-ups from 4×6 to 3×10; works for bodyweight lifts too); op=advanceWeek advances to the next plan week and loads that week's prescriptions into the program (overwriting in-week overrides — each change is recorded on the plan history; past the final plan week it only bumps the counter); op=setPhase sets `phase` (and optional `goal`). Respect the lifter's injury constraints when adjusting. ALWAYS pass a short `reason` explaining WHY — it is recorded on the plan's change history so the lifter can see why the plan moved (e.g. 'missed top set 2 sessions running').",
 			inputSchema: jsonSchema<AdjustInput>({
 				type: "object",
 				properties: {
@@ -180,6 +194,16 @@ export function buildTrainingTools(t: Training & PluginAuthoring, opts?: { decoy
 						throw new Error(`unknown op: ${(c as { op: string }).op}`);
 				}
 			},
+		}),
+		getTrainingPlan: tool({
+			description:
+				"Read the committed multi-week training plan (immutable reference; the live program is the working copy — advanceWeek loads the next plan week's prescriptions into it). Use for questions about what's coming ('what does week 5 look like?', 'when do I retest?'). Pass `week` to fetch a single week; omit it for the whole block.",
+			inputSchema: jsonSchema<{ week?: number }>({
+				type: "object",
+				properties: { week: { type: "integer", minimum: 1, description: "Fetch just this plan week (1-based)" } },
+				additionalProperties: false,
+			}),
+			execute: async ({ week }) => t.getTrainingPlan(week),
 		}),
 		setRestSeconds: tool({
 			description:

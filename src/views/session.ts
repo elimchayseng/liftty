@@ -68,6 +68,7 @@ export function renderSession(): string {
   .lift .weight { display: flex; align-items: baseline; gap: 6px; }
   .lift .weight .big { font-family: var(--display); font-size: 56px; font-weight: 900; letter-spacing: -0.03em; line-height: 0.85; }
   .lift .weight .lb { font-family: var(--ui); font-size: 13px; color: var(--faint); }
+  .lift .note { font-family: var(--ui); font-size: 11px; color: var(--faint); margin-top: 4px; }
   .lift .delta { font-family: var(--ui); font-size: 11px; color: var(--accent); margin-left: 8px; align-self: center; font-variant-numeric: tabular-nums; }
   .lift .prog { text-align: right; font-family: var(--ui); font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
   .lift .prog.met { color: var(--live); }
@@ -222,7 +223,10 @@ export function renderSession(): string {
     if (!lifts || !lifts.length) { liftsEl.innerHTML = '<div class="empty">No prescribed lifts.</div>'; return; }
     lifts.forEach(function (l) {
       if (l.kind === 'rounds') return; // circuits aren't set-logged here
-      var w = (l.weight != null ? l.weight : null);
+      // BW+X lifts (weighted pull-ups/dips) track their ADDED load as the working weight — the same
+      // number is prefilled and logged, so change detection and the flash work unchanged.
+      var bwx = (l.weight == null && l.addedWeight != null);
+      var w = (l.weight != null ? l.weight : (bwx ? l.addedWeight : null));
       var sch = l.sets + 'x' + l.reps;
       var prev = lastWeights.hasOwnProperty(l.exercise) ? lastWeights[l.exercise] : undefined;
       var schPrev = lastScheme.hasOwnProperty(l.exercise) ? lastScheme[l.exercise] : undefined;
@@ -258,9 +262,9 @@ export function renderSession(): string {
       // --- mid: big working weight + logged progress ---
       var mid = document.createElement('div'); mid.className = 'mid';
       var weight = document.createElement('div'); weight.className = 'weight';
-      var big = document.createElement('span'); big.className = 'big'; big.textContent = (w != null ? w : 'BW');
+      var big = document.createElement('span'); big.className = 'big'; big.textContent = (bwx ? 'BW+' + w : (w != null ? w : 'BW'));
       weight.appendChild(big);
-      if (w != null) { var lb = document.createElement('span'); lb.className = 'lb'; lb.textContent = 'lb' + (l.perSide ? ' /side' : ''); weight.appendChild(lb); }
+      if (w != null && !bwx) { var lb = document.createElement('span'); lb.className = 'lb'; lb.textContent = 'lb' + (l.perSide ? ' /side' : ''); weight.appendChild(lb); }
       if (weightMoved) { var d = document.createElement('span'); d.className = 'delta'; d.textContent = (w > prev ? '▲' : '▼') + ' was ' + prev; weight.appendChild(d); }
       else if (schemeMoved) { var d2 = document.createElement('span'); d2.className = 'delta'; d2.textContent = 'was ' + schPrev.replace('x', '×'); weight.appendChild(d2); }
       var done = loggedCount(active, l.exercise);
@@ -298,7 +302,9 @@ export function renderSession(): string {
       });
       ctl.appendChild(repsField); ctl.appendChild(wtField); ctl.appendChild(fail); ctl.appendChild(logBtn);
 
-      row.appendChild(top); row.appendChild(mid); row.appendChild(ctl);
+      row.appendChild(top);
+      if (l.note) { var noteEl = document.createElement('div'); noteEl.className = 'note'; noteEl.textContent = l.note; row.appendChild(noteEl); }
+      row.appendChild(mid); row.appendChild(ctl);
       liftsEl.appendChild(row);
 
       progRefs.push({ exercise: l.exercise, sets: l.sets, el: prog });
@@ -314,7 +320,7 @@ export function renderSession(): string {
     for (var i = 0; i < lifts.length; i++) {
       var l = lifts[i];
       if (l.kind === 'rounds') continue;
-      var w = (l.weight != null ? l.weight : null);
+      var w = (l.weight != null ? l.weight : (l.addedWeight != null ? l.addedWeight : null));
       if (lastWeights.hasOwnProperty(l.exercise) && lastWeights[l.exercise] !== w) return true;
       if (lastScheme.hasOwnProperty(l.exercise) && lastScheme[l.exercise] !== (l.sets + 'x' + l.reps)) return true;
     }

@@ -11,8 +11,15 @@ import { renderHead, renderHeader } from "./shared";
  * injury sentences, goal sentence) is intentionally dropped per the "no full-stop sentences" rule —
  * the data it summarized lives in the structured sections below.
  */
-export function renderPlan(data: { state: State; recentSessions: SessionRow[]; today: number; plugins?: PluginSummary[]; recentChanges?: ProgramChangeRow[] }): string {
-	const { state, recentSessions, today } = data;
+export function renderPlan(data: {
+	state: State;
+	recentSessions: SessionRow[];
+	today: number;
+	plugins?: PluginSummary[];
+	recentChanges?: ProgramChangeRow[];
+	plan?: { totalWeeks: number; label?: string; nextWeekDays?: PrescribedDay[] };
+}): string {
+	const { state, recentSessions, today, plan } = data;
 	const plugins = data.plugins ?? [];
 	const recentChanges = data.recentChanges ?? [];
 	const { lifter, program } = state;
@@ -79,7 +86,7 @@ export function renderPlan(data: { state: State; recentSessions: SessionRow[]; t
   ${renderHeader("plan")}
   <div class="main">
     <div class="lifter">${esc(lifter.name)} · ${esc(lifter.height)} · ${lifter.bodyweight} lb</div>
-    <div class="block">${esc(program.phase)} · week <span class="hl">${program.weekIndex}</span></div>
+    <div class="block">${esc(program.phase)} · week <span class="hl">${program.weekIndex}</span>${plan ? ` of ${plan.totalWeeks}` : ""}${plan?.label ? ` · <span class="hl">${esc(plan.label)}</span>` : ""}</div>
 
     ${
 			todayDay
@@ -114,6 +121,17 @@ export function renderPlan(data: { state: State; recentSessions: SessionRow[]; t
     <div class="box">
       ${upcoming
 				.map((d) => `<div class="row"><span class="dfocus">${esc(d.focus)}</span><span class="dday">${esc(d.day)}</span></div>`)
+				.join("")}
+    </div>`
+				: ""
+		}
+
+    ${
+			plan?.nextWeekDays?.length
+				? `<div class="slabel">next week · week ${program.weekIndex + 1}</div>
+    <div class="box">
+      ${plan.nextWeekDays
+				.map((d) => `<div class="row"><span class="dfocus">${esc(d.focus)}</span><span class="goal">${esc(topLiftBrief(d))}</span></div>`)
 				.join("")}
     </div>`
 				: ""
@@ -172,14 +190,27 @@ function renderHeroLift(l: Lift): string {
 	} else if (l.weight != null) {
 		val = `<span class="big">${l.weight}</span> <span class="unit">lb${l.perSide ? " /side" : ""}</span>`;
 		scheme = `${l.sets} × ${l.reps}`;
+	} else if (l.addedWeight != null) {
+		val = `<span class="big">BW+${l.addedWeight}</span>`;
+		scheme = `${l.sets} × ${l.reps}`;
 	} else {
 		val = `<span class="big">BW</span>`;
 		scheme = `${l.sets} × ${l.reps}${l.perSide ? " /side" : ""}`;
 	}
+	const note = l.note ? `<div class="hsub">${esc(l.note)}</div>` : "";
 	return `<div class="hlift">
-    <div><div class="hname">${esc(l.exercise)}</div><div class="hsub">${scheme}</div></div>
+    <div><div class="hname">${esc(l.exercise)}</div><div class="hsub">${scheme}</div>${note}</div>
     <div class="hval">${val}</div>
   </div>`;
+}
+
+/** The lead lift of a day as a one-line target for the "next week" box — "Front Squat 4×8 @ 135". */
+function topLiftBrief(d: PrescribedDay): string {
+	const l = d.lifts[0];
+	if (!l) return "";
+	if (l.kind === "rounds") return `${l.exercise} ${l.sets} rounds`;
+	const load = l.weight != null ? ` @ ${l.weight}${l.perSide ? "/side" : ""}` : l.addedWeight != null ? ` @ BW+${l.addedWeight}` : "";
+	return `${l.exercise} ${l.sets}×${l.reps}${load}`;
 }
 
 /** A saved plugin as a dashed policy row — "name vN · runs every set · 0 tokens" (0 in green). */

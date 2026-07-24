@@ -1,6 +1,7 @@
 import { SELF, env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import { getAgentByName } from "agents";
+import { TRAINING_PLAN } from "../fixtures";
 
 // Grab a typed RPC handle to a named LifttyAgent DO (its own per-name SQLite DB → test isolation).
 // `getAgentByName` wakes the DO and routes exactly like production, so onStart() (table creation +
@@ -523,7 +524,8 @@ describe("liftty plan change tracking (audit trail)", () => {
 	it("renders the change in the /plan page", async () => {
 		const a = await agent("me"); // /plan reads the singleton "me" DO
 		await a.reseed();
-		await a.adjustProgram({ op: "setExerciseWeight", exercise: "Incline Bench", weight: 100 }, { source: "coach", reason: "form dialed in" });
+		// 105 ≠ the week-1 seed (100) — a same-value change would be a no-op and record nothing.
+		await a.adjustProgram({ op: "setExerciseWeight", exercise: "Incline Bench", weight: 105 }, { source: "coach", reason: "form dialed in" });
 		const res = await SELF.fetch("https://example.com/plan");
 		expect(res.status).toBe(200);
 		const html = await res.text();
@@ -580,6 +582,153 @@ describe("liftty session finalize (live workout → history)", () => {
 		expect(res.ok).toBe(false);
 		const after = (await a.getHistory(undefined, 200)).length;
 		expect(after).toBe(before); // nothing added
+	});
+});
+
+describe("liftty multi-week training plan (MULTI-WEEK-PLAN)", () => {
+	// (a) Fixture shape guard: the hand-converted training-plan.json is validated here instead of by a
+	// CSV parser — every structural invariant the app relies on (rotation by focus, name continuity,
+	// finite loads, addedWeight only on bodyweight lifts) is asserted against the committed data.
+	it("fixture: 8 weeks, each with the A/B/C days, valid lifts, and consistent names", () => {
+		expect(TRAINING_PLAN.weeks.map((w) => w.week)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+		expect(TRAINING_PLAN.weeks[7].label).toBe("RETEST");
+		for (const w of TRAINING_PLAN.weeks) {
+			expect(w.days.map((d) => d.day)).toEqual(["Day A", "Day B", "Day C"]);
+			// Focus names are load-bearing (todayIndex rotation + WS day matching) — identical every week.
+			expect(w.days.map((d) => d.focus)).toEqual(["Front Squat", "Incline Bench", "Hang Clean"]);
+			for (const d of w.days) {
+				expect(d.lifts.length).toBeGreaterThan(0);
+				for (const l of d.lifts) {
+					expect(Number.isInteger(l.sets) && l.sets >= 1).toBe(true);
+					expect(Number.isInteger(l.reps) && l.reps >= 0).toBe(true);
+					if (l.kind === "rounds") expect(l.reps).toBe(0);
+					else expect(l.reps).toBeGreaterThanOrEqual(1);
+					if (l.weight != null) expect(Number.isFinite(l.weight) && l.weight > 0).toBe(true);
+					// addedWeight is exclusively the BW+X shape — never alongside a bar weight.
+					if (l.addedWeight != null) {
+						expect(l.weight).toBeUndefined();
+						expect(Number.isFinite(l.addedWeight) && l.addedWeight > 0).toBe(true);
+					}
+				}
+			}
+		}
+	});
+
+	// (b) advanceWeek loads the next plan week's prescriptions into the live program and records
+	// composite before→after deltas on the audit trail.
+	it("advanceWeek loads week 2 prescriptions and records per-lift deltas", async () => {
+		const a = await agent("plan-adv");
+		await a.reseed(); // week 1: FS 4×8 @ 125, RDL 4×8 @ 115
+		const res = await a.adjustProgram({ op: "advanceWeek" }, { source: "coach", reason: "week 1 done" });
+		expect(res.changed).toContain("Front Squat");
+
+		const prog = await a.getProgram();
+		expect(prog.weekIndex).toBe(2);
+		const dayA = prog.days[0].lifts;
+		expect(dayA.find((l: { exercise: string }) => l.exercise === "Front Squat").weight).toBe(130);
+		expect(dayA.find((l: { exercise: string }) => l.exercise === "Romanian Deadlift").weight).toBe(125);
+
+		const top = (await a.getProgramChanges(5))[0];
+		expect(top.op).toBe("advanceWeek");
+		expect(top.summary).toContain("plan loaded");
+		const fsDelta = top.detail.find((d: { exercise: string | null }) => d.exercise === "Front Squat");
+		expect(fsDelta.before).toBe("4×8 @ 125");
+		expect(fsDelta.after).toBe("4×8 @ 130");
+	});
+
+	// (c) An in-week override is overwritten by the plan on advance — and the audit row shows the
+	// override as `before`, so the overwrite is legible, never silent.
+	it("advanceWeek overwrites an in-week override and shows it in the delta", async () => {
+		const a = await agent("plan-override");
+		await a.reseed();
+		await a.adjustProgram({ op: "setExerciseWeight", exercise: "Romanian Deadlift", weight: 105 }, { source: "coach", reason: "back tweak" });
+		await a.adjustProgram({ op: "advanceWeek" }, { source: "coach" });
+		const top = (await a.getProgramChanges(5))[0];
+		const rdl = top.detail.find((d: { exercise: string | null }) => d.exercise === "Romanian Deadlift");
+		expect(rdl.before).toBe("4×8 @ 105"); // the override, not the week-1 plan value
+		expect(rdl.after).toBe("4×8 @ 125");
+	});
+
+	// (d) Advancing past the final plan week only bumps the counter — days stay as week 8 prescribed.
+	it("advanceWeek past week 8 leaves the days unchanged", async () => {
+		const a = await agent("plan-past-end");
+		await a.reseed();
+		for (let i = 0; i < 7; i++) await a.adjustProgram({ op: "advanceWeek" });
+		const wk8 = await a.getProgram();
+		expect(wk8.weekIndex).toBe(8);
+		expect(wk8.days[0].lifts.some((l: { exercise: string }) => l.exercise === "Front Squat 3RM Test")).toBe(true);
+
+		await a.adjustProgram({ op: "advanceWeek" });
+		const wk9 = await a.getProgram();
+		expect(wk9.weekIndex).toBe(9);
+		expect(wk9.days[0].lifts.some((l: { exercise: string }) => l.exercise === "Front Squat 3RM Test")).toBe(true); // untouched
+		expect((await a.getProgramChanges(5))[0].summary).toContain("beyond plan");
+	});
+
+	// (e) finalizeSession snapshots the prescribed day into the previously-empty sessions.prescribed.
+	it("finalizeSession stores the prescribed day's lifts on the history row", async () => {
+		const a = await agent("plan-prescribed");
+		await a.reseed(); // most recent seed session is Day C → today is Day A (Front Squat)
+		await a.logSet({ exercise: "Front Squat", reps: 8, weight: 125 });
+		const res = await a.finalizeSession();
+		expect(res.ok).toBe(true);
+
+		const q = await a.runReadOnlyQuery("SELECT prescribed FROM sessions WHERE id LIKE 'live-%'");
+		expect(q.rows.length).toBe(1);
+		const prescribed = JSON.parse(q.rows[0].prescribed);
+		expect(prescribed.week).toBe(1);
+		expect(prescribed.focus).toBe("Front Squat");
+		expect(prescribed.lifts.length).toBe(8);
+		expect(prescribed.lifts[0]).toMatchObject({ exercise: "Front Squat", sets: 4, reps: 8, weight: 125 });
+	});
+
+	// (f) setExerciseWeight on a BW+X lift moves addedWeight, never fabricating a bar weight.
+	it("setExerciseWeight updates addedWeight on a BW+X lift", async () => {
+		const a = await agent("plan-bwx");
+		await a.reseed();
+		for (let i = 0; i < 3; i++) await a.adjustProgram({ op: "advanceWeek" }); // week 4: Pull-ups 4×6 @ BW+10
+		const res = await a.adjustProgram({ op: "setExerciseWeight", exercise: "Pull-ups", weight: 15 }, { source: "coach" });
+		expect(res.changed).toContain("Pull-ups");
+		const pull = (await a.getProgram()).days[0].lifts.find((l: { exercise: string }) => l.exercise === "Pull-ups");
+		expect(pull.addedWeight).toBe(15);
+		expect(pull.weight).toBeUndefined();
+	});
+
+	// (g) getTrainingPlan exposes the committed plan (whole block, or one token-bounded week).
+	it("getTrainingPlan returns the block and filters to a single week", async () => {
+		const a = await agent("plan-read");
+		await a.reseed();
+		const all = await a.getTrainingPlan();
+		expect(all.totalWeeks).toBe(8);
+		expect(all.currentWeek).toBe(1);
+		expect(all.weeks.length).toBe(8);
+		const one = await a.getTrainingPlan(2);
+		expect(one.weeks.length).toBe(1);
+		expect(one.weeks[0].week).toBe(2);
+		expect(one.weeks[0].days[0].lifts[0]).toMatchObject({ exercise: "Front Squat", weight: 130 });
+	});
+
+	// (h) /plan renders the block position ("week 1 of 8") and the next-week preview box.
+	it("/plan shows week-of-block and next week's targets", async () => {
+		const a = await agent("me");
+		await a.reseed();
+		const html = await (await SELF.fetch("https://example.com/plan")).text();
+		expect(html).toContain("of 8");
+		expect(html).toContain("next week · week 2");
+		expect(html).toContain("Front Squat 4×8 @ 130");
+	});
+
+	// (i) On the final week /plan flags RETEST, renders the test-protocol note, and drops the
+	// next-week box (there is no week 9).
+	it("/plan on week 8 shows the RETEST label and protocol note", async () => {
+		const a = await agent("me");
+		await a.reseed();
+		for (let i = 0; i < 7; i++) await a.adjustProgram({ op: "advanceWeek" });
+		const html = await (await SELF.fetch("https://example.com/plan")).text();
+		expect(html).toContain("RETEST");
+		expect(html).toContain("stretch 180–185");
+		expect(html).not.toContain("next week · week 9");
+		await a.reseed(); // leave the shared "me" DO pristine for other tests
 	});
 });
 
