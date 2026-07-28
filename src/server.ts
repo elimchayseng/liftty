@@ -341,6 +341,72 @@ export type WeekProgress = {
 	extraByLabel: Record<string, number>;
 };
 
+/**
+ * One day-cell in the /block grid.
+ *
+ * `status` is the whole state machine the view renders against:
+ *   done   — a finalized session exists for this (week, day); `date` + `stats` are present
+ *   active — the live session is pinned to this cell right now
+ *   next   — the current week's first unlogged day, i.e. what "today" means
+ *   open   — selectable/unlogged (the current week's later days, or a passed week's gaps)
+ *   future — a week we haven't reached
+ */
+export type BlockCell = {
+	week: number;
+	day: string;
+	focus: string;
+	brief: string;
+	status: "done" | "active" | "next" | "open" | "future";
+	date?: string;
+	stats?: SessionStats;
+	/** Additional finalized sessions in this cell beyond the one shown — a repeated day. */
+	extra?: number;
+};
+
+export type BlockWeek = { week: number; label?: string; current: boolean; complete: boolean; cells: BlockCell[] };
+
+export type BlockView = {
+	name: string;
+	totalWeeks: number;
+	currentWeek: number;
+	/** weekIndex has walked past the last plan week (advanceWeek is unbounded). */
+	beyondBlock: boolean;
+	weeks: BlockWeek[];
+	activeSession: { day: string; dayLabel: string; week: number; sets: number } | null;
+	/** A session has sets logged — day switching and week changes are refused until it's finished. */
+	locked: boolean;
+	weekComplete: boolean;
+};
+
+/**
+ * Load a committed plan week's prescriptions into the working program, appending one composite delta
+ * per lift that actually moved. Shared by `advanceWeek` and `setWeek` — the ops differ only in how
+ * they bound the target week, not in what entering a week means.
+ *
+ * In-week coach/plugin overrides are overwritten BY DESIGN; the deltas (override as `before`, plan as
+ * `after`) keep that legible on the audit trail. Past the last plan week the days are left untouched.
+ * Mutates `program` and `deltas` in place; `moved` counts only the lifts this call touched.
+ */
+function loadPlanWeek(program: State["program"], target: number, deltas: ChangeDelta[]): { loaded: boolean; moved: number; label?: string } {
+	const planWeek = TRAINING_PLAN.weeks.find((w) => w.week === target);
+	if (!planWeek) return { loaded: false, moved: 0 };
+	const before = deltas.length;
+	const oldDays = program.days;
+	program.days = structuredClone(planWeek.days) as PrescribedDay[];
+	for (const d of program.days) {
+		const old = oldDays.find((o) => o.day === d.day);
+		for (const l of d.lifts) {
+			const prev = old?.lifts.find((o) => o.exercise === l.exercise);
+			const beforeBrief = prev ? liftBrief(prev) : null;
+			if (beforeBrief !== liftBrief(l)) deltas.push({ exercise: l.exercise, before: beforeBrief, after: liftBrief(l) });
+		}
+		for (const o of old?.lifts ?? [])
+			if (!d.lifts.some((l) => l.exercise === o.exercise)) deltas.push({ exercise: o.exercise, before: liftBrief(o), after: null });
+	}
+	program.phase = program.phase.replace(/ · deload wk$/, "");
+	return { loaded: true, moved: deltas.length - before, ...(planWeek.label ? { label: planWeek.label } : {}) };
+}
+
 export class LifttyAgent extends Agent<Env, State> implements Training, PluginAuthoring {
 	initialState = SEED_STATE;
 
@@ -495,30 +561,28 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 				const before = program.weekIndex;
 				program.weekIndex += 1;
 				deltas.push({ exercise: null, before, after: program.weekIndex });
-				// The committed plan drives progression: entering a plan week loads its prescriptions
-				// wholesale. In-week coach/plugin overrides are overwritten BY DESIGN — the per-lift
-				// composite deltas below (override as `before`, plan as `after`) keep that legible on the
-				// audit trail. Past the last plan week the days are left untouched.
-				const planWeek = TRAINING_PLAN.weeks.find((w) => w.week === program.weekIndex);
-				if (planWeek) {
-					const oldDays = program.days;
-					program.days = structuredClone(planWeek.days) as PrescribedDay[];
-					for (const d of program.days) {
-						const old = oldDays.find((o) => o.day === d.day);
-						for (const l of d.lifts) {
-							const prev = old?.lifts.find((o) => o.exercise === l.exercise);
-							const beforeBrief = prev ? liftBrief(prev) : null;
-							if (beforeBrief !== liftBrief(l)) deltas.push({ exercise: l.exercise, before: beforeBrief, after: liftBrief(l) });
-						}
-						for (const o of old?.lifts ?? [])
-							if (!d.lifts.some((l) => l.exercise === o.exercise)) deltas.push({ exercise: o.exercise, before: liftBrief(o), after: null });
-					}
-					program.phase = program.phase.replace(/ · deload wk$/, "");
-					const moved = deltas.length - 1;
-					summary = `advance to week ${program.weekIndex}${planWeek.label ? ` · ${planWeek.label}` : ""} · plan loaded (${moved} lift${moved === 1 ? "" : "s"} changed)`;
-				} else {
-					summary = `advance to week ${program.weekIndex} · beyond plan — days unchanged`;
-				}
+				const r = loadPlanWeek(program, program.weekIndex, deltas);
+				summary = r.loaded
+					? `advance to week ${program.weekIndex}${r.label ? ` · ${r.label}` : ""} · plan loaded (${r.moved} lift${r.moved === 1 ? "" : "s"} changed)`
+					: `advance to week ${program.weekIndex} · beyond plan — days unchanged`;
+				break;
+			}
+			case "setWeek": {
+				// Deliberately NOT `advanceWeek` with a computed target: advanceWeek is unbounded (it can
+				// walk past the last plan week to 9, 10, … leaving days untouched), whereas jumping to a
+				// week is a pick from the committed block and is clamped to it. Same body, different bounds.
+				const target = Math.min(TRAINING_PLAN.weeks.length, Math.max(1, Math.floor(Number.isFinite(change.week) ? change.week : program.weekIndex)));
+				const before = program.weekIndex;
+				program.weekIndex = target;
+				// Conditional, unlike advanceWeek's: re-picking the CURRENT week is a legitimate "reset this
+				// week to the committed plan", and when there are no overrides to discard it must record
+				// nothing at all rather than an audit row saying week 3 → week 3.
+				if (before !== target) deltas.push({ exercise: null, before, after: target });
+				const r = loadPlanWeek(program, target, deltas);
+				summary =
+					before === target
+						? `reload week ${target}${r.label ? ` · ${r.label}` : ""} · plan loaded (${r.moved} lift${r.moved === 1 ? "" : "s"} changed)`
+						: `week ${before} → ${target}${r.label ? ` · ${r.label}` : ""} · plan loaded (${r.moved} lift${r.moved === 1 ? "" : "s"} changed)`;
 				break;
 			}
 			case "setPhase": {
@@ -677,27 +741,54 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 		return this.state.program.days[this.weekProgress().todayIndex];
 	}
 
+	/**
+	 * The `session_hello` frame: which day the lifter is on, its prescriptions, the live session, and
+	 * where that day sits in the week. Built here rather than inline because two callers need it —
+	 * onConnect sends it to one connection, startSession broadcasts it after a day switch.
+	 */
+	private sessionHello(): string {
+		const active = this.state.activeSession;
+		const wp = this.weekProgress();
+		const day =
+			(active && (this.state.program.days.find((d) => d.day === active.dayLabel) ?? this.state.program.days.find((d) => d.focus === active.day))) ||
+			this.todayDay();
+		return JSON.stringify({
+			type: "session_hello",
+			day: day?.focus ?? "Session",
+			dayLabel: day?.day ?? "",
+			lifts: day?.lifts ?? [],
+			activeSession: active,
+			restSeconds: this.state.settings?.restSeconds ?? 60,
+			week: active?.week ?? this.state.program.weekIndex,
+			weekDone: wp.doneLabels,
+			weekComplete: wp.complete,
+		});
+	}
+
 	/** A phone opening /session: ensure an active session exists, then send the prescribed day. */
 	async onConnect(connection: Connection, _ctx: ConnectionContext): Promise<void> {
 		const today = this.todayDay();
-		if (!this.state.activeSession) {
+		const active = this.state.activeSession;
+		if (!active) {
 			this.setState({
 				...this.state,
-				activeSession: { startedAt: new Date().toISOString(), day: today?.focus ?? "Session", loggedSets: [] },
+				activeSession: {
+					startedAt: new Date().toISOString(),
+					day: today?.focus ?? "Session",
+					dayLabel: today?.day ?? "",
+					week: this.state.program.weekIndex,
+					loggedSets: [],
+				},
+			});
+		} else if (active.dayLabel == null) {
+			// One-time backfill for state persisted before activeSession carried a day label + week.
+			const day = this.state.program.days.find((d) => d.focus === active.day) ?? today;
+			this.setState({
+				...this.state,
+				activeSession: { ...active, dayLabel: day?.day ?? "", week: this.state.program.weekIndex },
 			});
 		}
-		const dayFocus = this.state.activeSession?.day ?? today?.focus;
-		const day = this.state.program.days.find((d) => d.focus === dayFocus) ?? today;
-		connection.send(
-			JSON.stringify({
-				type: "session_hello",
-				day: day?.focus ?? "Session",
-				dayLabel: day?.day ?? "",
-				lifts: day?.lifts ?? [],
-				activeSession: this.state.activeSession,
-				restSeconds: this.state.settings?.restSeconds ?? 60,
-			}),
-		);
+		connection.send(this.sessionHello());
 
 		// FLOW-LIVE-EVENTS: replay the recent event stream to THIS connection only (not a broadcast).
 		// `events` is ORDERED OLDEST-FIRST (we select the newest 24 by id DESC, then reverse) so the
@@ -725,7 +816,18 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 	 * then a rest alarm is scheduled.
 	 */
 	async onMessage(connection: Connection, message: WSMessage): Promise<void> {
-		let msg: { type?: string; exercise?: string; reps?: number; weight?: number; failed?: boolean; rest?: number; seconds?: number; sets?: number };
+		let msg: {
+			type?: string;
+			exercise?: string;
+			reps?: number;
+			weight?: number;
+			failed?: boolean;
+			rest?: number;
+			seconds?: number;
+			sets?: number;
+			day?: string;
+			nonce?: string;
+		};
 		try {
 			msg = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message));
 		} catch {
@@ -750,6 +852,14 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 					connection.send(JSON.stringify({ type: "error", message: err instanceof Error ? err.message : String(err) }));
 				}
 			}
+			return;
+		}
+		// NEW: switch the live session to another day of the week (Day A/B/C). /block drives this over
+		// HTTP, but the frame keeps an in-/session switcher one component away. startSession broadcasts
+		// the new session_hello on success; the ack here tells THIS client why a refusal happened.
+		if (msg.type === "select_day") {
+			const res = this.startSession({ day: typeof msg.day === "string" ? msg.day : "" });
+			connection.send(JSON.stringify({ type: "select_day_result", ...res }));
 			return;
 		}
 		// NEW: the /session Finish button persists the active workout into permanent history. The result
@@ -788,6 +898,39 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 		} catch (err) {
 			connection.send(JSON.stringify({ type: "error", message: err instanceof Error ? err.message : String(err) }));
 		}
+	}
+
+	/**
+	 * Open (or switch to) a session for a specific day of the current week — the write behind /block's
+	 * day cards and the `select_day` frame. Replaces the derived-rotation-only model: "today" is still
+	 * the default, but the lifter can say "I'm doing Day C" and be believed.
+	 *
+	 * Refuses to switch away from a session that already has sets logged. Those sets belong to a day and
+	 * a week; silently re-labelling them would corrupt history, and silently finalizing on a mis-tap
+	 * would end a workout mid-way. Re-selecting the SAME day is a no-op success, so a double-tap or a
+	 * replayed form POST is harmless.
+	 */
+	startSession(input: { day: string }): { ok: boolean; day?: string; dayLabel?: string; week?: number; reason?: string } {
+		const q = (input?.day ?? "").trim().toLowerCase();
+		if (!q) return { ok: false, reason: "no day given" };
+		const day = this.state.program.days.find((d) => d.day.toLowerCase() === q || d.focus.toLowerCase() === q);
+		if (!day) return { ok: false, reason: `unknown day "${input.day}"` };
+
+		const active = this.state.activeSession;
+		if (active && active.day === day.focus && active.dayLabel === day.day) {
+			return { ok: true, day: day.focus, dayLabel: day.day, week: active.week ?? this.state.program.weekIndex };
+		}
+		if (active && active.loggedSets.length > 0) {
+			return { ok: false, reason: "finish the current session first" };
+		}
+
+		const week = this.state.program.weekIndex;
+		this.setState({
+			...this.state,
+			activeSession: { startedAt: new Date().toISOString(), day: day.focus, dayLabel: day.day, week, loggedSets: [] },
+		});
+		this.broadcast(this.sessionHello());
+		return { ok: true, day: day.focus, dayLabel: day.day, week };
 	}
 
 	/**
@@ -1283,6 +1426,106 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 		const report = this.resetReport(profile);
 		this.broadcast(JSON.stringify({ type: "demo_reset" }));
 		return report;
+	}
+
+	/**
+	 * RPC: the whole committed block, shaped for /block — every week × day, what it prescribes, whether
+	 * it's been logged, and the numbers if it has.
+	 *
+	 * Ships one-line `brief`s rather than lift objects on purpose: the full 8 × 3 × ~8 lift tree is tens
+	 * of kilobytes of JSON for data the cards never render. The CURRENT week's cells come from the live
+	 * program rather than the fixture, because that's where in-week coach/plugin overrides live — the
+	 * view claiming to be the source of truth has to show what the lifter will actually be asked to lift.
+	 */
+	async getBlockData(): Promise<BlockView> {
+		const currentWeek = this.state.program.weekIndex;
+		const active = this.state.activeSession;
+		const locked = (active?.loggedSets.length ?? 0) > 0;
+
+		// One pass over history, indexed by "week|dayLabel" — cells look themselves up instead of
+		// rescanning per cell, and a repeated day resolves deterministically (newest wins + a count).
+		const rows = this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 200`;
+		const byKey = new Map<string, { row: SessionRow; actuals: SessionActuals; extra: number }>();
+		for (const row of rows) {
+			const a = parseActuals(row);
+			if (a.block !== BLOCK_TAG || a.week == null || !a.day) continue;
+			const key = `${a.week}|${a.day}`;
+			const hit = byKey.get(key);
+			if (hit) hit.extra += 1;
+			else byKey.set(key, { row, actuals: a, extra: 0 });
+		}
+
+		const wp = this.weekProgress();
+		const weeks: BlockWeek[] = TRAINING_PLAN.weeks.map((w) => {
+			const current = w.week === currentWeek;
+			const days = current ? this.state.program.days : w.days;
+			const cells: BlockCell[] = days.map((d, i) => {
+				const hit = byKey.get(`${w.week}|${d.day}`);
+				const status: BlockCell["status"] = hit
+					? "done"
+					: !current
+						? w.week < currentWeek
+							? "open" // a week we've moved past with this day never logged
+							: "future"
+						: i === wp.todayIndex
+							? "next"
+							: "open";
+				return {
+					week: w.week,
+					day: d.day,
+					focus: d.focus,
+					brief: topLiftBrief(d),
+					status: active && current && active.dayLabel === d.day ? "active" : status,
+					...(hit ? { date: hit.row.date, stats: sessionStats(hit.actuals.loggedSets ?? []) } : {}),
+					...(hit && hit.extra ? { extra: hit.extra } : {}),
+				};
+			});
+			return {
+				week: w.week,
+				...(w.label ? { label: w.label } : {}),
+				current,
+				complete: cells.length > 0 && cells.every((c) => c.status === "done"),
+				cells,
+			};
+		});
+
+		return {
+			name: TRAINING_PLAN.name,
+			totalWeeks: TRAINING_PLAN.weeks.length,
+			currentWeek,
+			// advanceWeek is unbounded, so the program can sit past the last plan week. /block renders a
+			// "beyond the block" state for that rather than pretending week 9 has cells.
+			beyondBlock: currentWeek > TRAINING_PLAN.weeks.length,
+			weeks,
+			activeSession: active
+				? { day: active.day, dayLabel: active.dayLabel ?? "", week: active.week ?? currentWeek, sets: active.loggedSets.length }
+				: null,
+			locked,
+			weekComplete: wp.complete,
+		};
+	}
+
+	/**
+	 * RPC: move the block to a specific week — the write behind /block's ADVANCE and GO TO WEEK buttons.
+	 * Manual by design; nothing in the app advances the week on the lifter's behalf.
+	 *
+	 * Blocked while a session has sets logged, for the same reason as startSession: those sets are filed
+	 * under the week they were started in, and changing the program underneath them mid-workout would
+	 * leave the /session screen prescribing a different week's weights than the one being logged.
+	 */
+	setBlockWeek(input: { week: number }): { ok: boolean; week?: number; reason?: string } {
+		const week = Math.floor(Number(input?.week));
+		if (!Number.isFinite(week) || week < 1 || week > TRAINING_PLAN.weeks.length) {
+			return { ok: false, reason: `week must be 1–${TRAINING_PLAN.weeks.length}` };
+		}
+		const active = this.state.activeSession;
+		if (active && active.loggedSets.length > 0) return { ok: false, reason: "finish the current session first" };
+
+		this.adjustProgram({ op: "setWeek", week }, { source: "lifter", reason: "picked from block view" });
+		// Drop an empty session so the next /session open re-derives the day from the new week rather
+		// than resuming a stale one pinned to the week we just left.
+		if (active) this.setState({ ...this.state, activeSession: null });
+		return { ok: true, week };
 	}
 
 	/** RPC: everything the /plan view needs, in one round-trip. */

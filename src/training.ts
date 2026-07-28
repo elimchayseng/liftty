@@ -40,6 +40,10 @@ export type ProgramChange =
 	| { op: "setExerciseWeight"; exercise: string; weight: number }
 	| { op: "setExerciseScheme"; exercise: string; sets?: number; reps?: number; exact?: boolean }
 	| { op: "advanceWeek" }
+	// Jump to any week of the committed block, forward or back, clamped to it. Not exposed as a coach
+	// tool — /block drives it server-side via setBlockWeek. advanceWeek stays the model's affordance
+	// (and stays unbounded, so it can walk past the block's last week).
+	| { op: "setWeek"; week: number }
 	| { op: "setPhase"; phase: string; goal?: string };
 
 /** adjustProgram reports exactly which exercises it touched, so the coach can report ground truth. */
