@@ -960,7 +960,7 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 	 * Disarm every pending rest alarm. Exactly one rest timer is meaningful at a time — the one for the
 	 * set just logged — so a new set supersedes the previous alarm rather than racing it.
 	 */
-	private async cancelRestAlarms(): Promise<void> {
+	async cancelRestAlarms(): Promise<void> {
 		for (const s of this.getSchedules()) {
 			if (s.callback === "restOver") await this.cancelSchedule(s.id);
 		}

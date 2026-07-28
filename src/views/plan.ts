@@ -19,8 +19,9 @@ export function renderPlan(data: {
 	plugins?: PluginSummary[];
 	recentChanges?: ProgramChangeRow[];
 	plan?: { totalWeeks: number; label?: string; nextWeekDays?: PrescribedDay[] };
+	week?: { index: number; done: string[]; complete: boolean };
 }): string {
-	const { state, recentSessions, today, plan } = data;
+	const { state, recentSessions, today, plan, week } = data;
 	const plugins = data.plugins ?? [];
 	const recentChanges = data.recentChanges ?? [];
 	const { lifter, program } = state;
@@ -64,6 +65,14 @@ export function renderPlan(data: {
   .row .dfocus { font-family: var(--display); font-weight: 600; font-size: 14px; color: var(--ink); }
   .row .dday { color: var(--faint); }
 
+  /* week strip: which of this week's days are in the books, and where the block moves next */
+  .wkstrip { display: flex; gap: 14px; margin-top: 14px; font-family: var(--ui); font-size: 12px; color: var(--faint); }
+  .wkstrip .d { display: flex; align-items: center; gap: 5px; }
+  .wkstrip .d.done { color: var(--live); }
+  .wkstrip .d.now { color: var(--accent); }
+  a.wkdone { display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--accent); color: var(--accent); font-family: var(--ui); font-size: 12px; padding: 14px 16px; margin-top: 16px; }
+  a.wkdone:hover { color: var(--accent); background: rgba(246,130,31,0.06); }
+
   .policy { border: 1px dashed var(--line-dash); padding: 14px 16px; font-family: var(--ui); font-size: 12px; color: var(--sub); }
   .policy + .policy { margin-top: 8px; }
   .policy .pname { color: var(--ink); }
@@ -89,15 +98,22 @@ export function renderPlan(data: {
     <div class="lifter">${esc(lifter.name)} · ${esc(lifter.height)} · ${lifter.bodyweight} lb</div>
     <div class="block">${esc(program.phase)} · week <span class="hl">${program.weekIndex}</span>${plan ? ` of ${plan.totalWeeks}` : ""}${plan?.label ? ` · <span class="hl">${esc(plan.label)}</span>` : ""}</div>
 
+    ${week ? renderWeekStrip(week, days) : ""}
+
     ${
-			todayDay
-				? `<div class="hero">
+			// Every day of the week is logged. There is no "today" left to lead with — repeating a finished
+			// day as the hero would just be misleading — so the block's next move takes the slot instead.
+			// Nothing advances on its own; /block is where it happens. The "next week" box below previews it.
+			week?.complete
+				? `<a class="wkdone" href="/block"><span>week ${week.index} complete — advance the block</span><span>&rarr;</span></a>`
+				: todayDay
+					? `<div class="hero">
       <div class="hero-top"><span class="eyebrow">today</span>${heroTag}</div>
       <div class="focus">${esc(todayDay.focus)}</div>
       <div class="hero-lifts">${todayDay.lifts.map(renderHeroLift).join("")}</div>
     </div>
     <a class="cta start" href="/session">START SESSION <span>&rarr;</span></a>`
-				: `<div class="box" style="margin-top:22px"><div class="row"><span class="empty">No program set.</span></div></div>`
+					: `<div class="box" style="margin-top:22px"><div class="row"><span class="empty">No program set.</span></div></div>`
 		}
 
     <div class="slabel">main lifts · goal</div>
@@ -154,6 +170,24 @@ export function renderPlan(data: {
   </div>
 </body>
 </html>`;
+}
+
+/**
+ * This week at a glance — "Day A ✓ · Day B ✓ · Day C ←". The count of logged sessions used to be
+ * invisible here, which is how three completed sessions could leave the lifter on week 1 wondering
+ * what was left to do.
+ */
+function renderWeekStrip(week: { index: number; done: string[]; complete: boolean }, days: PrescribedDay[]): string {
+	const next = days.find((d) => !week.done.includes(d.day));
+	return `<div class="wkstrip">${days
+		.map((d) => {
+			const done = week.done.includes(d.day);
+			const now = !done && next?.day === d.day;
+			// U+FE0E keeps the check monochrome — it renders as a colour emoji without it.
+			const mark = done ? "✓︎" : now ? "&larr;" : "·";
+			return `<span class="d${done ? " done" : now ? " now" : ""}">${esc(d.day)} ${mark}</span>`;
+		})
+		.join("")}</div>`;
 }
 
 /** One program-change row: what moved (summary) + when, with source + reason underneath. */
