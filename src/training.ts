@@ -33,7 +33,12 @@ export type SessionLog = {
 	summary?: string;
 };
 
-export type SetInput = { exercise: string; reps: number; weight?: number };
+/**
+ * `nonce` is an idempotency key minted by the /session client per LOG tap. It is deliberately absent
+ * from the coach's logSet tool schema (which is hand-written with additionalProperties:false) — it
+ * exists for the WebSocket path only, where a frame can be lost on a half-open socket and re-sent.
+ */
+export type SetInput = { exercise: string; reps: number; weight?: number; nonce?: string };
 
 export type ProgramChange =
 	| { op: "deload"; pct?: number }

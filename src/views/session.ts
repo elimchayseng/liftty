@@ -4,21 +4,33 @@ import { renderHead, renderHeader } from "./shared";
  * Server-rendered /session — the live workout stage (M4), design-refresh reskin.
  *
  * Opens a RAW WebSocket to wss://<host>/agents/liftty-agent/me. Protocol (all JSON):
- *   client → server:  { type:"log_set", exercise, reps, weight?, failed?, rest? }
- *                     { type:"set_rest", seconds }                    (NEW — configurable rest default)
- *                     { type:"set_scheme", exercise, sets?, reps? }   (NEW — editable sets×reps chips)
- *                     { type:"session_complete" }                     (NEW — Finish button → persist history)
- *   server → client:  { type:"session_hello", day, lifts, activeSession, restSeconds }
+ *   client → server:  { type:"log_set", exercise, reps, weight?, failed?, rest?, nonce? }
+ *                     { type:"set_rest", seconds }                    (configurable rest default)
+ *                     { type:"set_scheme", exercise, sets?, reps? }   (editable sets×reps chips)
+ *                     { type:"select_day", day }                      (switch to Day A/B/C)
+ *                     { type:"session_complete" }                     (Finish button → persist history)
+ *   server → client:  { type:"session_hello", day, dayLabel, lifts, activeSession, restSeconds,
+ *                       week, weekDone, weekComplete }
  *                     { type:"cf_agent_state", state }
  *                     { type:"set_logged", … } { type:"rest_started", exercise, seconds }
  *                     { type:"rest_over", exercise } { type:"plugin_fired", … } { type:"error", message }
- *                     { type:"session_finalized", id, day, week, sets, summary }  (NEW — broadcast on save)
- *                     { type:"session_complete_result", ok, … }                    (NEW — Finish ack)
+ *                     { type:"session_finalized", id, day, week, sets, summary }
+ *                     { type:"session_complete_result", ok, … } { type:"select_day_result", ok, … }
  *
  * Weight is the loudest thing on the page (56px Archivo). Prescribed sets×reps are editable chips that
- * persist via set_scheme; the rest default is an editable chip that persists via set_rest. Prescribed
- * rows re-render on every cf_agent_state ONLY when a weight/scheme actually changed, and flash orange —
- * so a policy that adjusts a weight is visible. The receipts strip proves the zero-token data plane.
+ * persist via set_scheme; the rest default is an editable chip that persists via set_rest. A policy
+ * that adjusts a weight flashes the row orange.
+ *
+ * THE INPUTS ARE SACRED. What the lifter has typed but not yet logged exists nowhere else, so no
+ * repaint may touch it. Rows are patched in place (patchLifts) and only rebuilt when the exercise LIST
+ * changes — a day switch or a week change. Typed values are mirrored into a localStorage draft keyed
+ * by week+day, so even a genuine reload (iOS Safari discards backgrounded tabs) restores them. Prefill
+ * precedence is draft > last set logged this session > prescription, which is why a reconnect restores
+ * the working weight rather than resetting to the program's opener.
+ *
+ * The socket is assumed unreliable: frames composed while it is down are queued and replayed on open
+ * rather than dropped, every LOG carries a nonce so a re-send after a half-open socket is deduped
+ * server-side, and reconnect backs off to 15s while jumping straight back on visibilitychange.
  */
 export function renderSession(): string {
 	const css = `
@@ -84,6 +96,11 @@ export function renderSession(): string {
   .lift .fail.on { background: #ff6b6b; color: var(--bg); border-color: #ff6b6b; }
   .lift .log { border: none; background: var(--marker); color: var(--bg); font-family: var(--display); font-weight: 800; font-size: 13px; padding: 0 18px; cursor: pointer; }
 
+  /* week-complete nudge — /block is where the block actually moves; nothing advances on its own */
+  #banner { display: none; border: 1px dashed var(--line-dash); color: var(--marker); font-family: var(--ui); font-size: 12px; padding: 12px 14px; margin-top: 18px; }
+  #banner.on { display: block; }
+  #banner a { color: var(--marker); text-decoration: underline; }
+
   .slabel { font-family: var(--ui); font-size: 11px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--faint); margin: 24px 0 12px; }
   #receipts { display: flex; flex-direction: column; gap: 8px; }
   .receipt { border-left: 2px solid var(--live); padding: 8px 12px; font-family: var(--mono); font-size: 11px; color: var(--sub); background: rgba(255,255,255,0.02); }
@@ -103,8 +120,9 @@ export function renderSession(): string {
 <body>
   ${renderHeader("session", live)}
   <div class="stage">
-    <div class="eyebrow">today</div>
+    <div class="eyebrow" id="eyebrow">today</div>
     <div class="focus" id="focus">—</div>
+    <div id="banner"></div>
 
     <div id="rest">
       <span id="restlbl">rest timer</span>
@@ -126,7 +144,7 @@ export function renderSession(): string {
 <script>
   var host = location.host;
   var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  var URL = proto + '//' + host + '/agents/liftty-agent/me';
+  var WS_URL = proto + '//' + host + '/agents/liftty-agent/me';
 
   var conn = document.getElementById('conn');
   var connlbl = document.getElementById('connlbl');
@@ -139,49 +157,81 @@ export function renderSession(): string {
   var restChip = document.getElementById('restchip');
   var finishEl = document.getElementById('finish');
 
+  var bannerEl = document.getElementById('banner');
+
   var ws = null;
   var restTimer = null;
   var restDoneTimer = null;
   var receiptCount = 0;
+  var retry = 0;                   // reconnect attempt count, drives the backoff
+  var outbox = [];                 // frames composed while the socket was down — flushed on open
+  var finishTimer = null;          // watchdog so a lost session_complete can't leave Finish dead
 
-  // Session view state, so we can re-render prescriptions live when a policy edits the program.
-  var currentFocus = null;         // today's day focus, e.g. "Front Squat"
-  var lastWeights = {};            // exercise -> last-seen prescribed weight (change detection + flash)
-  var lastScheme = {};             // exercise -> last-seen "sets x reps" (scheme change detection + flash)
+  // Session view state, so we can update prescriptions live when a policy edits the program.
+  var currentFocus = null;         // the day focus we're rendering, e.g. "Front Squat"
+  var currentDayLabel = '';        // "Day B" — half the draft-storage key
+  var currentWeek = null;          // the week this session belongs to — the other half
+  var rowsByEx = {};               // exercise -> the row's element refs, so we can patch instead of rebuild
+  var renderedSig = '';            // the exercise list the current rows were built for
+  var lastWeights = {};            // exercise -> last-rendered prescribed weight (change detection + flash)
+  var lastScheme = {};             // exercise -> last-rendered "sets x reps"
   var haveBaseline = false;        // suppress the flash on the very first render
-  var progRefs = [];               // [{exercise, sets, el}] so set-progress updates without a full re-render
-  var latestState = null;          // newest full state broadcast (source for a deferred re-render)
-  var pendingRerender = false;     // a prescription change arrived while the lifter was mid-edit — flush on blur
-
-  // A full renderLifts() rebuilds every row (innerHTML), which would steal focus and wipe an in-progress
-  // value if it ran while the lifter is typing in a chip/field. True when the focus is inside a lift row.
-  function isEditingLifts() { return liftsEl.contains(document.activeElement); }
+  var activeSets = [];             // activeSession.loggedSets — server truth, drives progress + prefill
+  var drafts = {};                 // exercise -> { reps, weight } TYPED but not yet logged
+  var draftSaveTimer = null;
 
   function setConn(state) {
     conn.className = 'conn' + (state === 'open' ? ' on' : state === 'closed' ? ' off' : '');
-    connlbl.textContent = state === 'open' ? 'live' : state === 'closed' ? 'disconnected' : 'connecting';
+    connlbl.textContent = state === 'open' ? 'live' : state === 'closed' ? (outbox.length ? 'queued' : 'disconnected') : 'connecting';
   }
 
-  // When focus leaves the lift area entirely, flush any re-render we deferred to protect an in-progress
-  // edit. The setTimeout(0) lets activeElement settle first, so tabbing between chips in the same area
-  // (still editing) keeps waiting rather than rebuilding under the lifter's fingers.
-  liftsEl.addEventListener('focusout', function () {
-    setTimeout(function () {
-      if (!pendingRerender || isEditingLifts()) return;
-      pendingRerender = false;
-      var lifts = latestState ? liftsFromState(latestState) : null;
-      if (lifts) renderLifts(lifts, latestState.activeSession);
-      updateProgress(latestState ? latestState.activeSession : null);
-    }, 0);
-  });
+  // --- drafts ---------------------------------------------------------------------------------
+  // What the lifter typed but hasn't logged lives ONLY in the DOM otherwise, so any repaint — and any
+  // reload iOS Safari does to a backgrounded tab — silently loses it. Keyed by week+day rather than by
+  // session start (which is re-stamped on the first set) so it survives a reconnect intact.
+  function draftKey() { return 'liftty.draft.' + currentWeek + '.' + currentDayLabel; }
+
+  function loadDrafts() {
+    drafts = {};
+    if (currentWeek == null || !currentDayLabel) return;
+    try {
+      var raw = localStorage.getItem(draftKey());
+      if (!raw) return;
+      var d = JSON.parse(raw);
+      // Drop anything stale: a draft from last week's Day B is noise, not a rescue.
+      if (!d || !d.savedAt || (Date.now() - d.savedAt) > 8 * 3600 * 1000) { localStorage.removeItem(draftKey()); return; }
+      drafts = d.byExercise || {};
+    } catch (_) { drafts = {}; }
+  }
+
+  function saveDrafts() {
+    if (currentWeek == null || !currentDayLabel) return;
+    if (draftSaveTimer) clearTimeout(draftSaveTimer);
+    draftSaveTimer = setTimeout(function () {
+      try { localStorage.setItem(draftKey(), JSON.stringify({ savedAt: Date.now(), byExercise: drafts })); } catch (_) {}
+    }, 400);
+  }
+
+  function clearDrafts() {
+    drafts = {};
+    try { localStorage.removeItem(draftKey()); } catch (_) {}
+  }
 
   // Finish the workout: persist the active session into permanent history. Server acks with
-  // session_complete_result (and broadcasts session_finalized on success). Briefly disabled to avoid
-  // a double-tap saving twice; re-enabled once the server responds.
+  // session_complete_result (and broadcasts session_finalized on success).
   finishEl.addEventListener('click', function () {
+    // Only disable once the frame is actually on the wire. send() used to swallow it on a closed
+    // socket, leaving the button permanently dead — which is what "saving is buggy" looked like.
+    if (!send({ type: 'session_complete' })) { addErr('offline — save queued, will send on reconnect'); return; }
     finishEl.disabled = true;
-    send({ type: 'session_complete' });
+    if (finishTimer) clearTimeout(finishTimer);
+    finishTimer = setTimeout(function () { finishEl.disabled = false; addErr('no response — tap FINISH again'); }, 8000);
   });
+
+  function finishDone() {
+    if (finishTimer) { clearTimeout(finishTimer); finishTimer = null; }
+    finishEl.disabled = false;
+  }
 
   // The editable rest-default chip persists via a set_rest frame; the next logged set rests this long.
   restChip.addEventListener('change', function () {
@@ -192,10 +242,37 @@ export function renderSession(): string {
     send({ type: 'set_rest', seconds: s });
   });
 
-  function loggedCount(active, exercise) {
-    var n = 0, sets = active && active.loggedSets ? active.loggedSets : [];
-    for (var i = 0; i < sets.length; i++) if (sets[i].exercise === exercise) n++;
+  function loggedCount(exercise) {
+    var n = 0;
+    for (var i = 0; i < activeSets.length; i++) if (activeSets[i].exercise === exercise) n++;
     return n;
+  }
+
+  /** The last set actually logged for this exercise in this session, or null. */
+  function lastLogged(exercise) {
+    for (var i = activeSets.length - 1; i >= 0; i--) if (activeSets[i].exercise === exercise) return activeSets[i];
+    return null;
+  }
+
+  /** The working load a lift is performed at — BW+X lifts carry theirs in addedWeight. */
+  function workWeight(l) { return l.weight != null ? l.weight : (l.addedWeight != null ? l.addedWeight : null); }
+
+  /**
+   * What the reps/weight fields should show, in precedence order:
+   *   1. an unlogged draft — what the lifter typed and hasn't committed
+   *   2. the last set they logged for this exercise THIS session — you work at the weight you're
+   *      working at, not the one the program opened with
+   *   3. the prescription
+   * Server-authoritative from (2) down, which is what lets a reconnect restore the right numbers
+   * instead of resetting them to the prescription.
+   */
+  function prefill(l) {
+    var d = drafts[l.exercise];
+    if (d) return { reps: d.reps, weight: d.weight };
+    var last = lastLogged(l.exercise);
+    if (last) return { reps: String(last.reps), weight: last.weight ? String(last.weight) : '' };
+    var w = workWeight(l);
+    return { reps: String(l.reps), weight: w != null ? String(w) : '' };
   }
 
   function liftsFromState(state) {
@@ -206,36 +283,118 @@ export function renderSession(): string {
     return null;
   }
 
-  // Refresh only the per-lift "logged N / M" line — never a full re-render, so inputs the lifter is
-  // mid-typing (reps/weight, fail toggle, sets×reps chips) are never clobbered on a routine broadcast.
-  function updateProgress(active) {
-    for (var i = 0; i < progRefs.length; i++) {
-      var ref = progRefs[i];
-      var done = loggedCount(active, ref.exercise);
-      ref.el.textContent = 'logged ' + done + ' / ' + ref.sets;
-      ref.el.className = 'prog' + (done >= ref.sets ? ' met' : '');
+  /** The set of exercises we've built rows for — a change here (day switch, week change) needs a rebuild. */
+  function signature(lifts) {
+    var names = [];
+    for (var i = 0; i < lifts.length; i++) if (lifts[i].kind !== 'rounds') names.push(lifts[i].exercise);
+    return names.join('|');
+  }
+
+  /**
+   * The single entry point for "the program says this now". Rebuilds only when the exercise LIST
+   * changed; otherwise patches the existing rows.
+   *
+   * This is the fix for the reported weight-reset. The old code rebuilt every row with innerHTML on
+   * every session_hello — and the socket closes constantly on a phone (screen lock, backgrounding,
+   * cell/wifi handoff), reconnecting two seconds later. Every typed weight snapped back to the
+   * prescription and it looked exactly like the browser had refreshed, when nothing had reloaded.
+   */
+  function applyLifts(lifts, active) {
+    if (active && active.loggedSets) activeSets = active.loggedSets;
+    if (!lifts || !lifts.length) {
+      liftsEl.innerHTML = '<div class="empty">No prescribed lifts.</div>';
+      rowsByEx = {}; renderedSig = '';
+      return;
+    }
+    var sig = signature(lifts);
+    if (sig !== renderedSig) renderLifts(lifts);
+    else patchLifts(lifts);
+    updateProgress();
+  }
+
+  /** Refresh only the per-lift "logged N / M" line — never touches an input. */
+  function updateProgress() {
+    for (var ex in rowsByEx) {
+      if (!rowsByEx.hasOwnProperty(ex)) continue;
+      var r = rowsByEx[ex];
+      var done = loggedCount(ex);
+      r.prog.textContent = 'logged ' + done + ' / ' + r.sets;
+      r.prog.className = 'prog' + (done >= r.sets ? ' met' : '');
     }
   }
 
-  function renderLifts(lifts, active) {
-    liftsEl.innerHTML = '';
-    progRefs = [];
-    if (!lifts || !lifts.length) { liftsEl.innerHTML = '<div class="empty">No prescribed lifts.</div>'; return; }
+  /**
+   * Update the prescription shown on existing rows — big weight, sets×reps chips, the delta + flash.
+   * Inputs are only re-seeded when they are neither focused nor holding a draft, so a policy firing
+   * mid-set can never take the number out from under the lifter's fingers.
+   */
+  function patchLifts(lifts) {
     lifts.forEach(function (l) {
-      if (l.kind === 'rounds') return; // circuits aren't set-logged here
-      // BW+X lifts (weighted pull-ups/dips) track their ADDED load as the working weight — the same
-      // number is prefilled and logged, so change detection and the flash work unchanged.
+      var r = rowsByEx[l.exercise];
+      if (!r) return;
+      var w = workWeight(l);
       var bwx = (l.weight == null && l.addedWeight != null);
-      var w = (l.weight != null ? l.weight : (bwx ? l.addedWeight : null));
       var sch = l.sets + 'x' + l.reps;
       var prev = lastWeights.hasOwnProperty(l.exercise) ? lastWeights[l.exercise] : undefined;
       var schPrev = lastScheme.hasOwnProperty(l.exercise) ? lastScheme[l.exercise] : undefined;
       var weightMoved = haveBaseline && prev !== undefined && prev !== w;
       var schemeMoved = haveBaseline && schPrev !== undefined && schPrev !== sch;
-      var changed = weightMoved || schemeMoved;
+
+      r.big.textContent = (bwx ? 'BW+' + w : (w != null ? w : 'BW'));
+      r.lb.textContent = (w != null && !bwx) ? ('lb' + (l.perSide ? ' /side' : '')) : '';
+      if (document.activeElement !== r.setsChip) r.setsChip.value = l.sets;
+      if (document.activeElement !== r.repsChip) r.repsChip.value = l.reps;
+      r.sets = l.sets;
+
+      r.delta.textContent = weightMoved
+        ? ((w > prev ? '▲' : '▼') + ' was ' + prev)
+        : (schemeMoved ? ('was ' + String(schPrev).replace('x', '×')) : '');
+
+      if (weightMoved || schemeMoved) {
+        // Restart the flash animation — reassigning className alone won't replay it.
+        r.row.classList.remove('changed'); void r.row.offsetWidth; r.row.classList.add('changed');
+        // A prescription that MOVED is a fresh instruction — newer than both the draft and the last
+        // set logged, so it takes the field. Miss a rep, the policy cuts you to 100, and the next set
+        // is queued up at 100 rather than at the 125 you just failed. (Steady-state prescriptions do
+        // NOT do this: that's the reset the lifter was complaining about.)
+        delete drafts[l.exercise];
+        saveDrafts();
+        if (document.activeElement !== r.wt) r.wt.value = w != null ? String(w) : '';
+        if (schemeMoved && document.activeElement !== r.reps) r.reps.value = String(l.reps);
+      } else {
+        seedInputs(l, r);
+      }
+      lastWeights[l.exercise] = w;
+      lastScheme[l.exercise] = sch;
+    });
+    haveBaseline = true;
+  }
+
+  /**
+   * Push the prefill into a row's inputs. The only guard is focus — writing over the field the lifter
+   * has their cursor in would move it. A draft needs no guard of its own: prefill() already resolves
+   * to the draft when there is one, so re-seeding a row mid-edit writes back the same value.
+   */
+  function seedInputs(l, r) {
+    var p = prefill(l);
+    if (document.activeElement !== r.reps) r.reps.value = p.reps;
+    if (document.activeElement !== r.wt) r.wt.value = p.weight;
+  }
+
+  /** Full rebuild. Only runs when the exercise list itself changed — a day switch or a week change. */
+  function renderLifts(lifts) {
+    liftsEl.innerHTML = '';
+    rowsByEx = {};
+    lifts.forEach(function (l) {
+      if (l.kind === 'rounds') return; // circuits aren't set-logged here
+      // BW+X lifts (weighted pull-ups/dips) track their ADDED load as the working weight — the same
+      // number is prefilled and logged, so change detection and the flash work unchanged.
+      var bwx = (l.weight == null && l.addedWeight != null);
+      var w = workWeight(l);
+      var sch = l.sets + 'x' + l.reps;
 
       var row = document.createElement('div');
-      row.className = 'lift' + (changed ? ' changed' : '');
+      row.className = 'lift';
 
       // --- top: name + editable sets×reps chips ---
       var top = document.createElement('div'); top.className = 'top';
@@ -248,10 +407,10 @@ export function renderSession(): string {
       repsChip.className = 'chip'; repsChip.type = 'number'; repsChip.min = '1'; repsChip.value = l.reps; repsChip.setAttribute('aria-label', 'reps');
       var chint = document.createElement('span'); chint.className = 'chint'; chint.textContent = 'sets×reps';
       function commitScheme() {
-        var s = parseInt(setsChip.value, 10), r = parseInt(repsChip.value, 10);
+        var s = parseInt(setsChip.value, 10), r2 = parseInt(repsChip.value, 10);
         var payload = { type: 'set_scheme', exercise: l.exercise };
         if (s >= 1) payload.sets = s;
-        if (r >= 1) payload.reps = r;
+        if (r2 >= 1) payload.reps = r2;
         if (payload.sets != null || payload.reps != null) send(payload);
       }
       setsChip.addEventListener('change', commitScheme);
@@ -263,42 +422,54 @@ export function renderSession(): string {
       var mid = document.createElement('div'); mid.className = 'mid';
       var weight = document.createElement('div'); weight.className = 'weight';
       var big = document.createElement('span'); big.className = 'big'; big.textContent = (bwx ? 'BW+' + w : (w != null ? w : 'BW'));
-      weight.appendChild(big);
-      if (w != null && !bwx) { var lb = document.createElement('span'); lb.className = 'lb'; lb.textContent = 'lb' + (l.perSide ? ' /side' : ''); weight.appendChild(lb); }
-      if (weightMoved) { var d = document.createElement('span'); d.className = 'delta'; d.textContent = (w > prev ? '▲' : '▼') + ' was ' + prev; weight.appendChild(d); }
-      else if (schemeMoved) { var d2 = document.createElement('span'); d2.className = 'delta'; d2.textContent = 'was ' + schPrev.replace('x', '×'); weight.appendChild(d2); }
-      var done = loggedCount(active, l.exercise);
+      var lb = document.createElement('span'); lb.className = 'lb';
+      lb.textContent = (w != null && !bwx) ? ('lb' + (l.perSide ? ' /side' : '')) : '';
+      var delta = document.createElement('span'); delta.className = 'delta';
+      weight.appendChild(big); weight.appendChild(lb); weight.appendChild(delta);
       var prog = document.createElement('span');
-      prog.className = 'prog' + (done >= l.sets ? ' met' : '');
-      prog.textContent = 'logged ' + done + ' / ' + l.sets;
+      prog.className = 'prog';
+      prog.textContent = 'logged 0 / ' + l.sets;
       mid.appendChild(weight); mid.appendChild(prog);
 
       // --- ctl: actual reps + weight fields, fail, LOG ---
       var ctl = document.createElement('div'); ctl.className = 'ctl';
       var repsField = document.createElement('label'); repsField.className = 'field';
       var reps = document.createElement('input');
-      reps.type = 'number'; reps.value = l.reps; reps.min = '1'; reps.setAttribute('aria-label', 'reps logged');
+      reps.type = 'number'; reps.min = '1'; reps.setAttribute('aria-label', 'reps logged');
       var ru = document.createElement('span'); ru.className = 'u'; ru.textContent = 'reps';
       repsField.appendChild(reps); repsField.appendChild(ru);
       var wtField = document.createElement('label'); wtField.className = 'field wt';
       var wt = document.createElement('input');
-      wt.type = 'number'; wt.value = (w != null ? w : ''); wt.placeholder = 'BW'; wt.setAttribute('aria-label', 'weight logged');
+      wt.type = 'number'; wt.placeholder = 'BW'; wt.setAttribute('aria-label', 'weight logged');
       var wu = document.createElement('span'); wu.className = 'u'; wu.textContent = 'lb';
       wtField.appendChild(wt); wtField.appendChild(wu);
       var fail = document.createElement('button');
       fail.type = 'button'; fail.className = 'fail'; fail.textContent = 'fail';
-      var failed = false;
-      fail.addEventListener('click', function () { failed = !failed; fail.classList.toggle('on', failed); });
       var logBtn = document.createElement('button');
       logBtn.type = 'button'; logBtn.className = 'log'; logBtn.textContent = 'LOG';
+
+      var ref = { row: row, setsChip: setsChip, repsChip: repsChip, big: big, lb: lb, delta: delta, prog: prog, reps: reps, wt: wt, fail: fail, failed: false, sets: l.sets };
+      rowsByEx[l.exercise] = ref;
+
+      // Every keystroke becomes a draft, so a repaint (or a reload) has something to restore from.
+      function noteDraft() { drafts[l.exercise] = { reps: reps.value, weight: wt.value }; saveDrafts(); }
+      reps.addEventListener('input', noteDraft);
+      wt.addEventListener('input', noteDraft);
+
+      fail.addEventListener('click', function () { ref.failed = !ref.failed; fail.classList.toggle('on', ref.failed); });
       logBtn.addEventListener('click', function () {
-        var r = parseInt(reps.value, 10);
-        if (!r || r < 1) return;
+        var r2 = parseInt(reps.value, 10);
+        if (!r2 || r2 < 1) return;
         var wv = wt.value === '' ? null : parseFloat(wt.value);
-        var payload = { type: 'log_set', exercise: l.exercise, reps: r, failed: failed };
+        // A per-tap idempotency key: if the frame is lost on a half-open socket and re-sent, the
+        // server recognises the retry instead of logging the set twice.
+        var payload = { type: 'log_set', exercise: l.exercise, reps: r2, failed: ref.failed, nonce: mkNonce() };
         if (wv != null && !isNaN(wv)) payload.weight = wv;
-        send(payload);
-        failed = false; fail.classList.remove('on');
+        if (!send(payload)) addErr('offline — set queued, will send on reconnect');
+        // The set is committed (or queued): its values are no longer an uncommitted draft, so drop it
+        // and let the server's loggedSets drive the prefill from here.
+        delete drafts[l.exercise]; saveDrafts();
+        ref.failed = false; fail.classList.remove('on');
       });
       ctl.appendChild(repsField); ctl.appendChild(wtField); ctl.appendChild(fail); ctl.appendChild(logBtn);
 
@@ -307,25 +478,15 @@ export function renderSession(): string {
       row.appendChild(mid); row.appendChild(ctl);
       liftsEl.appendChild(row);
 
-      progRefs.push({ exercise: l.exercise, sets: l.sets, el: prog });
+      seedInputs(l, ref);
       lastWeights[l.exercise] = w;
       lastScheme[l.exercise] = sch;
     });
+    renderedSig = signature(lifts);
     haveBaseline = true;
   }
 
-  // True if any prescribed weight OR sets×reps scheme differs from what we last rendered.
-  function programChanged(lifts) {
-    if (!lifts) return false;
-    for (var i = 0; i < lifts.length; i++) {
-      var l = lifts[i];
-      if (l.kind === 'rounds') continue;
-      var w = (l.weight != null ? l.weight : (l.addedWeight != null ? l.addedWeight : null));
-      if (lastWeights.hasOwnProperty(l.exercise) && lastWeights[l.exercise] !== w) return true;
-      if (lastScheme.hasOwnProperty(l.exercise) && lastScheme[l.exercise] !== (l.sets + 'x' + l.reps)) return true;
-    }
-    return false;
-  }
+  function mkNonce() { return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8); }
 
   function addReceipt(text, isPlugin) {
     if (receiptCount === 0) receiptsEl.innerHTML = '';
@@ -365,32 +526,65 @@ export function renderSession(): string {
     restDoneTimer = setTimeout(function () { restEl.className = ''; restDoneTimer = null; }, 4000);
   }
 
+  /**
+   * Returns true if the frame reached the wire, false if it was queued.
+   *
+   * The old version dropped the frame silently whenever the socket was down, which swallowed every
+   * LOG tap with no error and no visual — the Finish button just made it obvious by going dead.
+   * readyState !== 1 means nothing was ever written, so queueing and replaying on open is safe.
+   */
   function send(obj) {
-    if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+    if (ws && ws.readyState === 1) { ws.send(JSON.stringify(obj)); return true; }
+    outbox.push(obj);
+    setConn('closed');
+    return false;
+  }
+
+  function flushOutbox() {
+    var queued = outbox;
+    outbox = [];
+    for (var i = 0; i < queued.length; i++) {
+      if (!(ws && ws.readyState === 1)) { outbox = outbox.concat(queued.slice(i)); break; }
+      ws.send(JSON.stringify(queued[i]));
+    }
   }
 
   function handle(msg) {
     switch (msg.type) {
       case 'session_hello':
+        var dayChanged = (msg.day || null) !== currentFocus;
         currentFocus = msg.day || null;
         focusEl.textContent = msg.day || 'Session';
-        if (msg.restSeconds != null) restChip.value = msg.restSeconds;
-        renderLifts(msg.lifts, msg.activeSession);   // seeds lastWeights (no flash on first paint)
+        if (msg.dayLabel) { currentDayLabel = msg.dayLabel; document.getElementById('eyebrow').textContent = msg.dayLabel; }
+        if (msg.week != null) currentWeek = msg.week;
+        if (dayChanged) { lastWeights = {}; lastScheme = {}; haveBaseline = false; renderedSig = ''; loadDrafts(); }
+        if (msg.restSeconds != null && document.activeElement !== restChip) restChip.value = msg.restSeconds;
+        setBanner(msg.weekComplete, msg.week);
+        // applyLifts patches when the exercise list is unchanged, so a plain reconnect — which is
+        // constant on a phone — leaves every typed value exactly where it was.
+        applyLifts(msg.lifts, msg.activeSession);
         break;
       case 'cf_agent_state':
         if (msg.state) {
-          latestState = msg.state;
           if (msg.state.settings && msg.state.settings.restSeconds != null && document.activeElement !== restChip) {
             restChip.value = msg.state.settings.restSeconds;   // reflect coach-set default (chat path)
           }
-          var lifts = liftsFromState(msg.state);
-          if (lifts && programChanged(lifts)) {
-            // Defer the rebuild if the lifter is mid-edit in a row — flush it on focusout instead, so a
-            // committed sets edit (or a policy firing) never yanks focus or wipes a half-typed value.
-            if (isEditingLifts()) pendingRerender = true;
-            else renderLifts(lifts, msg.state.activeSession);
+          var act = msg.state.activeSession;
+          // A day switch (from /block, or another tab) changes the exercise list entirely, so the
+          // usual per-exercise change detection finds no overlap and would report "nothing changed".
+          if (act && act.day && act.day !== currentFocus) {
+            currentFocus = act.day;
+            currentDayLabel = act.dayLabel || currentDayLabel;
+            if (act.week != null) currentWeek = act.week;
+            focusEl.textContent = act.day;
+            if (act.dayLabel) document.getElementById('eyebrow').textContent = act.dayLabel;
+            lastWeights = {}; lastScheme = {}; haveBaseline = false; renderedSig = '';
+            loadDrafts();
           }
-          updateProgress(msg.state.activeSession);   // always: cheap, never resets inputs
+          activeSets = (act && act.loggedSets) || [];
+          var lifts = liftsFromState(msg.state);
+          if (lifts) applyLifts(lifts, act);
+          else updateProgress();
         }
         break;
       case 'set_logged':
@@ -403,20 +597,28 @@ export function renderSession(): string {
         restDone();
         break;
       case 'plugin_fired':
-        var changed = msg.changed && msg.changed.length ? ' · adjusted ' + msg.changed.map(esc).join(', ') : ' · no change';
-        addReceipt('<span class="ink">' + esc(msg.name) + '</span> fired · ' + msg.ms + ' ms · ' + (msg.cold ? 'cold' : 'warm') + ' · <span class="ink">0 tokens</span>' + changed, true);
+        // Only surface a policy that actually DID something. A policy runs on every logged set and
+        // almost always returns no actions, so reporting each evaluation buried the one line that
+        // matters — the weights the lifter logged — under a wall of "fired · no change".
+        if (!(msg.actionsApplied > 0) && !msg.error) break;
+        var changed = msg.changed && msg.changed.length ? ' · adjusted ' + msg.changed.map(esc).join(', ') : '';
+        addReceipt('<span class="ink">' + esc(msg.name) + '</span> ' + (msg.error ? 'failed · ' + esc(String(msg.error)) : 'fired · ' + msg.ms + ' ms · ' + (msg.cold ? 'cold' : 'warm') + ' · <span class="ink">0 tokens</span>' + changed), true);
         break;
       case 'session_finalized':
         // Broadcast on a successful save — show the rolled-up summary as a receipt. The following
         // cf_agent_state (activeSession now null) resets the per-lift progress lines to 0 on its own.
         addReceipt('session saved · <span class="ink">' + msg.sets + ' set' + (msg.sets === 1 ? '' : 's') + '</span> · ' + esc(msg.summary || ''), false);
-        finishEl.disabled = false;
+        clearDrafts();
+        finishDone();
         break;
       case 'session_complete_result':
         // Direct ack to THIS client. On success the receipt already came via session_finalized; only
         // surface the "nothing to save" case here so an empty Finish tap is not silent.
         if (!msg.ok) addErr('nothing to save' + (msg.reason ? ' · ' + msg.reason : ''));
-        finishEl.disabled = false;
+        finishDone();
+        break;
+      case 'select_day_result':
+        if (!msg.ok) addErr(msg.reason || 'could not switch day');
         break;
       case 'error':
         addErr(msg.message || 'unknown');
@@ -424,13 +626,26 @@ export function renderSession(): string {
     }
   }
 
+  /** Nothing advances the block on its own — when the week is done, point at where it moves. */
+  function setBanner(complete, week) {
+    if (!complete) { bannerEl.className = ''; bannerEl.innerHTML = ''; return; }
+    bannerEl.className = 'on';
+    bannerEl.innerHTML = 'week ' + (week != null ? week : '') + ' is complete — <a href="/block">advance the block</a>.';
+  }
+
   function esc(s) { return String(s).replace(/[<>&]/g, function (c) { return c === '<' ? '&lt;' : c === '>' ? '&gt;' : '&amp;'; }); }
 
   function connect() {
     setConn('connecting');
-    ws = new WebSocket(URL);
-    ws.addEventListener('open', function () { setConn('open'); });
-    ws.addEventListener('close', function () { setConn('closed'); setTimeout(connect, 2000); });
+    ws = new WebSocket(WS_URL);
+    ws.addEventListener('open', function () { retry = 0; setConn('open'); flushOutbox(); });
+    // Backoff, capped at 15s: the old fixed 2s retry hammered the agent for the whole time a phone
+    // sat asleep in a gym bag, and every reconnect cost a session_hello.
+    ws.addEventListener('close', function () {
+      setConn('closed');
+      var wait = Math.min(15000, 1000 * Math.pow(2, retry++));
+      setTimeout(connect, wait);
+    });
     ws.addEventListener('error', function () { setConn('closed'); });
     ws.addEventListener('message', function (e) {
       var msg;
@@ -438,6 +653,14 @@ export function renderSession(): string {
       handle(msg);
     });
   }
+
+  // Coming back to the tab is the moment the lifter expects it to be live — don't make them wait out
+  // a backoff window that was sized for a screen that was off.
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState !== 'visible') return;
+    if (!ws || ws.readyState > 1) { retry = 0; connect(); }
+  });
+
   connect();
 </script>
 </body>

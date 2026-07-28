@@ -100,7 +100,7 @@ export type State = {
 		// (onConnect backfills both once).
 		dayLabel?: string; // "Day B"
 		week?: number;
-		loggedSets: { exercise: string; reps: number; weight: number }[];
+		loggedSets: LoggedSet[];
 	};
 	// Per-user settings persisted in the DO. `restSeconds` is the default rest timer (seconds) between
 	// logged sets — coach-configurable ("rest 90 seconds") and editable from the /session chip. Optional
@@ -461,6 +461,14 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 		// to null in storage; a non-positive/non-integer rep count is meaningless.)
 		if (!Number.isInteger(set.reps) || set.reps < 1) throw new Error(`logSet: reps must be a positive integer (got ${set.reps})`);
 		if (set.weight != null && !Number.isFinite(set.weight)) throw new Error(`logSet: weight must be a finite number (got ${set.weight})`);
+		// Idempotency. A phone can hold a socket in readyState OPEN whose frames never reach the server
+		// (half-open TCP after a screen lock / network handoff); the lifter sees no receipt, taps LOG
+		// again after the reconnect, and the set lands twice. The nonce makes the retry a no-op. Stored
+		// on the set itself, so this survives DO hibernation rather than living in socket-lifetime memory.
+		if (set.nonce && this.state.activeSession?.loggedSets.some((s) => s.nonce === set.nonce)) {
+			const n = this.state.activeSession.loggedSets.length;
+			return { activeSets: n, message: `Already logged ${set.exercise} (set ${n})` };
+		}
 		let active = this.state.activeSession;
 		if (!active) {
 			const today = this.todayDay();
@@ -476,7 +484,10 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 		// by the time real work happens — and finalizeSession derives the history row's DATE from it.
 		// Re-stamp on the first actual set so a session is dated when it was lifted, not when it was opened.
 		const startedAt = active.loggedSets.length === 0 ? new Date().toISOString() : active.startedAt;
-		const loggedSets = [...active.loggedSets, { exercise: set.exercise, reps: set.reps, weight: set.weight ?? 0 }];
+		const loggedSets = [
+			...active.loggedSets,
+			{ exercise: set.exercise, reps: set.reps, weight: set.weight ?? 0, ...(set.nonce ? { nonce: set.nonce } : {}) },
+		];
 		this.setState({ ...this.state, activeSession: { ...active, startedAt, loggedSets } });
 		const w = set.weight != null ? ` @ ${set.weight}` : "";
 		return { activeSets: loggedSets.length, message: `Logged ${set.exercise} ${set.reps}${w} (set ${loggedSets.length} of ${active.day})` };
@@ -876,10 +887,21 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 				connection.send(JSON.stringify({ type: "error", message: "log_set needs exercise + reps" }));
 				return;
 			}
-			const res = this.logSet({ exercise: msg.exercise, reps: msg.reps, weight: msg.weight });
+			const before = this.state.activeSession?.loggedSets.length ?? 0;
+			const res = this.logSet({ exercise: msg.exercise, reps: msg.reps, weight: msg.weight, nonce: msg.nonce });
 			connection.send(
-				JSON.stringify({ type: "set_logged", exercise: msg.exercise, reps: msg.reps, weight: msg.weight ?? null, failed: !!msg.failed, ...res }),
+				JSON.stringify({
+					type: "set_logged",
+					exercise: msg.exercise,
+					reps: msg.reps,
+					weight: msg.weight ?? null,
+					failed: !!msg.failed,
+					...(msg.nonce ? { nonce: msg.nonce } : {}),
+					...res,
+				}),
 			);
+			// A deduped retry must not restart the rest timer or re-fire policies — it logged nothing.
+			if ((this.state.activeSession?.loggedSets.length ?? 0) === before) return;
 
 			// Rest timer BEFORE plugins. firePlugins awaits a Worker Loader isolate round-trip; leaving
 			// rest_started behind it made the countdown visibly start late on every set.

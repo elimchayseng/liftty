@@ -9,8 +9,12 @@ import type { Lift, PrescribedDay } from "./server";
  * time (fixtures/index.ts does the same), so there is no runtime cycle back into server.ts.
  */
 
-/** One logged set as stored in `activeSession.loggedSets` / `sessions.actuals.loggedSets`. */
-export type LoggedSet = { exercise: string; reps: number; weight: number };
+/**
+ * One logged set as stored in `activeSession.loggedSets` / `sessions.actuals.loggedSets`.
+ * `nonce` is the client's idempotency key for the set (see SetInput) — stored so the dedupe survives
+ * DO hibernation and reconnects, not just the lifetime of one socket.
+ */
+export type LoggedSet = { exercise: string; reps: number; weight: number; nonce?: string };
 
 /**
  * One-line prescription for a lift — "4×8 @ 125", "3×8 @ 30/side", "4×6 @ BW+10", "3 rounds", "4×6".
