@@ -28,9 +28,16 @@ import { renderHead, renderHeader } from "./shared";
  * precedence is draft > last set logged this session > prescription, which is why a reconnect restores
  * the working weight rather than resetting to the program's opener.
  *
- * The socket is assumed unreliable: frames composed while it is down are queued and replayed on open
- * rather than dropped, every LOG carries a nonce so a re-send after a half-open socket is deduped
- * server-side, and reconnect backs off to 15s while jumping straight back on visibilitychange.
+ * The socket is assumed unreliable: frames composed while it is down are queued (and mirrored to
+ * localStorage, so a discarded tab doesn't lose them) and replayed on open rather than dropped, every
+ * LOG carries a nonce so a re-send after a half-open socket is deduped server-side, and reconnect
+ * backs off while jumping straight back on visibilitychange. Exactly one socket and one pending retry
+ * exist at a time — a superseded socket's listeners are ignored rather than left to double-handle.
+ *
+ * TESTING GAP: everything below the CSS is ES5 inside a template literal, and nothing executes it.
+ * The suite covers the markup contract and the server side of every frame, but the client state
+ * machine — patch-vs-rebuild, drafts, the outbox, prefill precedence — is verified by hand in a
+ * browser. Exercising it needs a DOM environment the worker-pool test setup doesn't provide.
  */
 export function renderSession(): string {
 	const css = `
@@ -159,11 +166,22 @@ export function renderSession(): string {
 
   var bannerEl = document.getElementById('banner');
 
+  // Behavioural constants — every one of these encodes a product decision, so they get names.
+  var DRAFT_TTL_MS = 8 * 3600 * 1000;   // a draft older than a gym session is noise, not a rescue
+  var DRAFT_DEBOUNCE_MS = 400;          // coalesce keystrokes into one localStorage write
+  var OUTBOX_TTL_MS = 12 * 3600 * 1000; // replaying yesterday's sets would corrupt today's log
+  var OUTBOX_KEY = 'liftty.outbox';
+  var FINISH_TIMEOUT_MS = 8000;         // re-enable FINISH if the server never answers
+  var REST_CLEAR_MS = 4000;             // how long "rest over · go" stays up
+  var RECONNECT_BASE_MS = 1000;
+  var RECONNECT_MAX_MS = 15000;
+
   var ws = null;
   var restTimer = null;
   var restDoneTimer = null;
   var receiptCount = 0;
   var retry = 0;                   // reconnect attempt count, drives the backoff
+  var reconnectTimer = null;       // the one pending retry — cleared before any new connect()
   var outbox = [];                 // frames composed while the socket was down — flushed on open
   var finishTimer = null;          // watchdog so a lost session_complete can't leave Finish dead
 
@@ -199,17 +217,27 @@ export function renderSession(): string {
       if (!raw) return;
       var d = JSON.parse(raw);
       // Drop anything stale: a draft from last week's Day B is noise, not a rescue.
-      if (!d || !d.savedAt || (Date.now() - d.savedAt) > 8 * 3600 * 1000) { localStorage.removeItem(draftKey()); return; }
+      if (!d || !d.savedAt || (Date.now() - d.savedAt) > DRAFT_TTL_MS) { localStorage.removeItem(draftKey()); return; }
       drafts = d.byExercise || {};
     } catch (_) { drafts = {}; }
   }
 
-  function saveDrafts() {
+  function writeDrafts() {
     if (currentWeek == null || !currentDayLabel) return;
+    try { localStorage.setItem(draftKey(), JSON.stringify({ savedAt: Date.now(), byExercise: drafts })); } catch (_) {}
+  }
+
+  function saveDrafts() {
     if (draftSaveTimer) clearTimeout(draftSaveTimer);
-    draftSaveTimer = setTimeout(function () {
-      try { localStorage.setItem(draftKey(), JSON.stringify({ savedAt: Date.now(), byExercise: drafts })); } catch (_) {}
-    }, 400);
+    draftSaveTimer = setTimeout(function () { draftSaveTimer = null; writeDrafts(); }, DRAFT_DEBOUNCE_MS);
+  }
+
+  // Force the debounced write out. The tab being discarded mid-window is precisely the failure drafts
+  // exist to survive, so the last keystrokes must not be sitting in a pending timer when it happens.
+  function flushWrites() {
+    if (draftSaveTimer) { clearTimeout(draftSaveTimer); draftSaveTimer = null; }
+    writeDrafts();
+    saveOutbox();
   }
 
   function clearDrafts() {
@@ -217,15 +245,45 @@ export function renderSession(): string {
     try { localStorage.removeItem(draftKey()); } catch (_) {}
   }
 
+  // The outbox holds frames the lifter has already committed to (a logged set, a save). Keeping it in
+  // memory only meant a discarded tab lost them silently, which is the one thing this page must not do.
+  function saveOutbox() {
+    try {
+      if (outbox.length) localStorage.setItem(OUTBOX_KEY, JSON.stringify({ savedAt: Date.now(), frames: outbox }));
+      else localStorage.removeItem(OUTBOX_KEY);
+    } catch (_) {}
+  }
+
+  function loadOutbox() {
+    try {
+      var raw = localStorage.getItem(OUTBOX_KEY);
+      if (!raw) return;
+      var d = JSON.parse(raw);
+      // Stale frames are worse than no frames — replaying yesterday's sets into today's session would
+      // corrupt the log. The nonce makes a genuine retry safe; time makes an ancient one wrong.
+      if (!d || !d.savedAt || (Date.now() - d.savedAt) > OUTBOX_TTL_MS || !d.frames || !d.frames.length) {
+        localStorage.removeItem(OUTBOX_KEY);
+        return;
+      }
+      outbox = d.frames;
+    } catch (_) { outbox = []; }
+  }
+
   // Finish the workout: persist the active session into permanent history. Server acks with
   // session_complete_result (and broadcasts session_finalized on success).
   finishEl.addEventListener('click', function () {
     // Only disable once the frame is actually on the wire. send() used to swallow it on a closed
     // socket, leaving the button permanently dead — which is what "saving is buggy" looked like.
-    if (!send({ type: 'session_complete' })) { addErr('offline — save queued, will send on reconnect'); return; }
+    var sent = send({ type: 'session_complete' });
+    if (!sent) addErr('offline — save queued, will send on reconnect');
+    // Disable either way: the frame is committed (sent or queued, and send() collapses duplicates),
+    // so further taps can only produce confusion. The watchdog re-enables if nothing comes back.
     finishEl.disabled = true;
     if (finishTimer) clearTimeout(finishTimer);
-    finishTimer = setTimeout(function () { finishEl.disabled = false; addErr('no response — tap FINISH again'); }, 8000);
+    finishTimer = setTimeout(function () {
+      finishEl.disabled = false;
+      addErr(sent ? 'no response — tap FINISH again' : 'still offline — save is queued');
+    }, FINISH_TIMEOUT_MS);
   });
 
   function finishDone() {
@@ -241,12 +299,6 @@ export function renderSession(): string {
     restChip.value = s;
     send({ type: 'set_rest', seconds: s });
   });
-
-  function loggedCount(exercise) {
-    var n = 0;
-    for (var i = 0; i < activeSets.length; i++) if (activeSets[i].exercise === exercise) n++;
-    return n;
-  }
 
   /** The last set actually logged for this exercise in this session, or null. */
   function lastLogged(exercise) {
@@ -314,10 +366,17 @@ export function renderSession(): string {
 
   /** Refresh only the per-lift "logged N / M" line — never touches an input. */
   function updateProgress() {
+    // One pass over the sets, not one scan per row: this runs on every cf_agent_state, which the
+    // server broadcasts on every logged set, so per-row scanning grows quadratically as a session fills.
+    var counts = {};
+    for (var i = 0; i < activeSets.length; i++) {
+      var ex2 = activeSets[i].exercise;
+      counts[ex2] = (counts[ex2] || 0) + 1;
+    }
     for (var ex in rowsByEx) {
       if (!rowsByEx.hasOwnProperty(ex)) continue;
       var r = rowsByEx[ex];
-      var done = loggedCount(ex);
+      var done = counts[ex] || 0;
       r.prog.textContent = 'logged ' + done + ' / ' + r.sets;
       r.prog.className = 'prog' + (done >= r.sets ? ' met' : '');
     }
@@ -353,17 +412,25 @@ export function renderSession(): string {
       if (weightMoved || schemeMoved) {
         // Restart the flash animation — reassigning className alone won't replay it.
         r.row.classList.remove('changed'); void r.row.offsetWidth; r.row.classList.add('changed');
-        // A prescription that MOVED is a fresh instruction — newer than both the draft and the last
-        // set logged, so it takes the field. Miss a rep, the policy cuts you to 100, and the next set
-        // is queued up at 100 rather than at the 125 you just failed. (Steady-state prescriptions do
-        // NOT do this: that's the reset the lifter was complaining about.)
-        delete drafts[l.exercise];
-        saveDrafts();
-        if (document.activeElement !== r.wt) r.wt.value = w != null ? String(w) : '';
-        if (schemeMoved && document.activeElement !== r.reps) r.reps.value = String(l.reps);
-      } else {
-        seedInputs(l, r);
       }
+      // A prescription that MOVED is a fresh instruction — newer than both the draft and the last set
+      // logged — so it takes its OWN field. Miss a rep, the policy cuts you to 100, and the next set is
+      // queued at 100 rather than the 125 you just failed. (A steady-state prescription never does
+      // this: that's the reset the lifter was complaining about.)
+      //
+      // The two moves are kept strictly separate. A scheme change is usually the lifter's own doing —
+      // editing the sets×reps chip round-trips through the server and comes back as schemeMoved — so
+      // letting it reach for the weight field would destroy a weight they had just typed, which is the
+      // exact bug this whole change exists to fix.
+      if (weightMoved) {
+        if (drafts[l.exercise]) { drafts[l.exercise].weight = w != null ? String(w) : ''; saveDrafts(); }
+        if (document.activeElement !== r.wt) r.wt.value = w != null ? String(w) : '';
+      }
+      if (schemeMoved) {
+        if (drafts[l.exercise]) { drafts[l.exercise].reps = String(l.reps); saveDrafts(); }
+        if (document.activeElement !== r.reps) r.reps.value = String(l.reps);
+      }
+      if (!weightMoved && !schemeMoved) seedInputs(l, r);
       lastWeights[l.exercise] = w;
       lastScheme[l.exercise] = sch;
     });
@@ -465,10 +532,15 @@ export function renderSession(): string {
         // server recognises the retry instead of logging the set twice.
         var payload = { type: 'log_set', exercise: l.exercise, reps: r2, failed: ref.failed, nonce: mkNonce() };
         if (wv != null && !isNaN(wv)) payload.weight = wv;
-        if (!send(payload)) addErr('offline — set queued, will send on reconnect');
-        // The set is committed (or queued): its values are no longer an uncommitted draft, so drop it
-        // and let the server's loggedSets drive the prefill from here.
-        delete drafts[l.exercise]; saveDrafts();
+        if (send(payload)) {
+          // On the wire: the values are no longer an uncommitted draft, so drop it and let the
+          // server's loggedSets drive the prefill from here.
+          delete drafts[l.exercise]; saveDrafts();
+        } else {
+          // Queued only. The outbox is in memory, and the tab being discarded is exactly the case
+          // drafts exist for — dropping the draft here would delete the last copy of the set.
+          addErr('offline — set queued, will send on reconnect');
+        }
         ref.failed = false; fail.classList.remove('on');
       });
       ctl.appendChild(repsField); ctl.appendChild(wtField); ctl.appendChild(fail); ctl.appendChild(logBtn);
@@ -523,7 +595,7 @@ export function renderSession(): string {
     restEl.className = 'on done';
     restLbl.textContent = 'rest over';
     restNum.textContent = 'go';
-    restDoneTimer = setTimeout(function () { restEl.className = ''; restDoneTimer = null; }, 4000);
+    restDoneTimer = setTimeout(function () { restEl.className = ''; restDoneTimer = null; }, REST_CLEAR_MS);
   }
 
   /**
@@ -534,8 +606,17 @@ export function renderSession(): string {
    * readyState !== 1 means nothing was ever written, so queueing and replaying on open is safe.
    */
   function send(obj) {
-    if (ws && ws.readyState === 1) { ws.send(JSON.stringify(obj)); return true; }
+    if (ws && ws.readyState === 1) {
+      try { ws.send(JSON.stringify(obj)); return true; }
+      catch (_) { /* raced to CLOSING between the check and the call — fall through and queue */ }
+    }
+    // One pending save is enough; a lifter tapping FINISH repeatedly while offline would otherwise
+    // queue N of them, and all but the first come back as "nothing to save" after the reconnect.
+    if (obj.type === 'session_complete') {
+      for (var j = 0; j < outbox.length; j++) if (outbox[j].type === 'session_complete') { setConn('closed'); return false; }
+    }
     outbox.push(obj);
+    saveOutbox();
     setConn('closed');
     return false;
   }
@@ -544,9 +625,13 @@ export function renderSession(): string {
     var queued = outbox;
     outbox = [];
     for (var i = 0; i < queued.length; i++) {
-      if (!(ws && ws.readyState === 1)) { outbox = outbox.concat(queued.slice(i)); break; }
-      ws.send(JSON.stringify(queued[i]));
+      if (!(ws && ws.readyState === 1)) { outbox = queued.slice(i); break; }
+      // Requeue the remainder on ANY send failure — emptying the array up front and then throwing
+      // would drop every frame behind the one that failed.
+      try { ws.send(JSON.stringify(queued[i])); }
+      catch (_) { outbox = queued.slice(i); break; }
     }
+    saveOutbox();
   }
 
   function handle(msg) {
@@ -609,6 +694,9 @@ export function renderSession(): string {
         // cf_agent_state (activeSession now null) resets the per-lift progress lines to 0 on its own.
         addReceipt('session saved · <span class="ink">' + msg.sets + ' set' + (msg.sets === 1 ? '' : 's') + '</span> · ' + esc(msg.summary || ''), false);
         clearDrafts();
+        // The workout is in the books — nothing still queued belongs to it, and replaying a stray
+        // log_set now would reopen a session on whatever day the server derives next.
+        outbox = []; saveOutbox();
         finishDone();
         break;
       case 'session_complete_result':
@@ -630,24 +718,37 @@ export function renderSession(): string {
   function setBanner(complete, week) {
     if (!complete) { bannerEl.className = ''; bannerEl.innerHTML = ''; return; }
     bannerEl.className = 'on';
-    bannerEl.innerHTML = 'week ' + (week != null ? week : '') + ' is complete — <a href="/block">advance the block</a>.';
+    bannerEl.innerHTML = 'week ' + esc(week != null ? week : '') + ' is complete — <a href="/block">advance the block</a>.';
   }
 
   function esc(s) { return String(s).replace(/[<>&]/g, function (c) { return c === '<' ? '&lt;' : c === '>' ? '&gt;' : '&amp;'; }); }
 
   function connect() {
+    // Exactly one socket and one pending retry at a time. Without this, a pending backoff timer and a
+    // visibilitychange could both call connect(), leaving an orphaned-but-OPEN socket whose listeners
+    // keep firing — duplicate receipts, a restarted rest countdown, and another socket on every
+    // screen-lock cycle.
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (ws && ws.readyState <= 1) return;
+
     setConn('connecting');
-    ws = new WebSocket(WS_URL);
-    ws.addEventListener('open', function () { retry = 0; setConn('open'); flushOutbox(); });
-    // Backoff, capped at 15s: the old fixed 2s retry hammered the agent for the whole time a phone
-    // sat asleep in a gym bag, and every reconnect cost a session_hello.
-    ws.addEventListener('close', function () {
-      setConn('closed');
-      var wait = Math.min(15000, 1000 * Math.pow(2, retry++));
-      setTimeout(connect, wait);
+    var sock = new WebSocket(WS_URL);
+    ws = sock;
+    sock.addEventListener('open', function () {
+      if (ws !== sock) return;
+      retry = 0; setConn('open'); flushOutbox();
     });
-    ws.addEventListener('error', function () { setConn('closed'); });
-    ws.addEventListener('message', function (e) {
+    // Backoff, capped: the old fixed 2s retry hammered the agent for the whole time a phone sat asleep
+    // in a gym bag, and every reconnect cost a session_hello.
+    sock.addEventListener('close', function () {
+      if (ws !== sock) return; // a superseded socket closing must not schedule anything
+      setConn('closed');
+      var wait = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * Math.pow(2, retry++));
+      reconnectTimer = setTimeout(connect, wait);
+    });
+    sock.addEventListener('error', function () { if (ws === sock) setConn('closed'); });
+    sock.addEventListener('message', function (e) {
+      if (ws !== sock) return; // ignore anything still arriving on a socket we've replaced
       var msg;
       try { msg = JSON.parse(e.data); } catch (_) { return; }
       handle(msg);
@@ -657,10 +758,13 @@ export function renderSession(): string {
   // Coming back to the tab is the moment the lifter expects it to be live — don't make them wait out
   // a backoff window that was sized for a screen that was off.
   document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState !== 'visible') return;
-    if (!ws || ws.readyState > 1) { retry = 0; connect(); }
+    if (document.visibilityState === 'visible') { retry = 0; connect(); return; }
+    flushWrites(); // going away: land the debounced draft before the tab can be discarded
   });
+  // pagehide is the last event an iOS tab reliably gets before discard.
+  window.addEventListener('pagehide', flushWrites);
 
+  loadOutbox();
   connect();
 </script>
 </body>

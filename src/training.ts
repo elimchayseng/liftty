@@ -159,7 +159,10 @@ export function buildTrainingTools(t: Training & PluginAuthoring, opts?: { decoy
 				required: ["exercise", "reps"],
 				additionalProperties: false,
 			}),
-			execute: async (set) => t.logSet(set),
+			// Destructure rather than forwarding the raw object: jsonSchema()'s additionalProperties:false
+			// is advisory to the model, not enforced at runtime, so a model-emitted `nonce` would
+			// otherwise reach the WS-only dedupe and turn repeat calls into silent no-ops.
+			execute: async ({ exercise, reps, weight }) => t.logSet({ exercise, reps, weight }),
 		}),
 		adjustProgram: tool({
 			description:

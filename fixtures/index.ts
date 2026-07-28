@@ -31,6 +31,13 @@ export type PlanWeek = {
 };
 
 export type TrainingPlan = {
+	/**
+	 * Stable machine identity for the block. Stamped into every finalized session so history can be
+	 * partitioned by block — see BLOCK_TAG in src/server.ts. NEVER displayed, and NEVER edited once
+	 * sessions exist: changing it orphans every logged session from the block. `name` is the display
+	 * string and is free to change.
+	 */
+	id: string;
 	name: string;
 	startDate?: string; // plan week 1 start (informational; rotation ignores calendar dates)
 	weeks: PlanWeek[];

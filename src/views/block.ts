@@ -52,10 +52,11 @@ export function renderBlock(data: BlockView, err?: string | null): string {
   .cell.done { border-left: 2px solid var(--live); }
   .cell.next { border-left: 2px solid var(--accent); }
   .cell.next .cday { color: var(--accent); }
-  .cell.active { border-left: 2px solid var(--marker); }
-  .cell.active .cday { color: var(--marker); }
+  .cell.live { border-left: 2px solid var(--marker); }
+  .cell.live .cday { color: var(--marker); }
   .cell.future { opacity: 0.55; }
   .cell .mark { color: var(--live); }
+  .cell .dot { color: var(--marker); }
 
   .wk-act { margin-top: 12px; }
   button.cta { width: 100%; font-size: 14px; letter-spacing: 0.08em; padding: 14px; }
@@ -118,24 +119,29 @@ function renderWeek(w: BlockWeek, data: BlockView): string {
  */
 function renderCell(c: BlockCell, w: BlockWeek, data: BlockView): string {
 	// U+FE0E forces text presentation — without it the check renders as a colour emoji on iOS/macOS and
-	// breaks out of the monochrome palette.
-	const tick = c.status === "done" ? `<span class="mark">✓︎</span>` : c.status === "active" ? `<span>●︎</span>` : c.status === "next" ? `<span>←</span>` : "";
+	// breaks out of the monochrome palette. `live` is independent of status: a finished day that has
+	// been reopened keeps its ✓ and gains the in-progress dot.
+	const marks = [c.status === "done" ? `<span class="mark">✓︎</span>` : c.status === "next" ? `<span>←</span>` : "", c.live ? `<span class="dot">●︎</span>` : ""]
+		.filter(Boolean)
+		.join(" ");
 	const stats = c.stats
 		? `<div class="cstats">${c.stats.sets} set${c.stats.sets === 1 ? "" : "s"}${c.stats.volume > 0 ? ` · ${c.stats.volume.toLocaleString("en-US")} lb` : ""}</div>
        ${c.stats.top[0] ? `<div class="ctop">top ${esc(c.stats.top[0].exercise)} ${c.stats.top[0].reps}×${c.stats.top[0].weight || "BW"}</div>` : ""}
        <div class="cdate">${esc(c.date ?? "")}${c.extra ? ` · +${c.extra} more` : ""}</div>`
 		: "";
-	const inner = `<div class="cday"><span>${esc(c.day)}</span>${tick}</div>
+	const inner = `<div class="cday"><span>${esc(c.day)}</span><span>${marks}</span></div>
     <div class="cfocus">${esc(c.focus)}</div>
     <div class="cbrief">${esc(c.brief)}</div>
     ${stats}`;
 
-	const selectable = w.current && !data.locked && c.status !== "active";
-	if (!selectable) return `<div class="cell ${c.status}">${inner}</div>`;
+	const cls = `cell ${c.status}${c.live ? " live" : ""}`;
+	// The cell the live session is already on isn't a switch target — tapping it is a no-op.
+	const selectable = w.current && !data.locked && !c.live;
+	if (!selectable) return `<div class="${cls}">${inner}</div>`;
 	return `<form class="act" method="post" action="/block">
     <input type="hidden" name="intent" value="day" />
     <input type="hidden" name="day" value="${esc(c.day)}" />
-    <button class="cell ${c.status}" type="submit">${inner}</button>
+    <button class="${cls}" type="submit">${inner}</button>
   </form>`;
 }
 
