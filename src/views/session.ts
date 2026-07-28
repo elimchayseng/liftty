@@ -34,10 +34,11 @@ import { renderHead, renderHeader } from "./shared";
  * backs off while jumping straight back on visibilitychange. Exactly one socket and one pending retry
  * exist at a time — a superseded socket's listeners are ignored rather than left to double-handle.
  *
- * TESTING GAP: everything below the CSS is ES5 inside a template literal, and nothing executes it.
- * The suite covers the markup contract and the server side of every frame, but the client state
- * machine — patch-vs-rebuild, drafts, the outbox, prefill precedence — is verified by hand in a
- * browser. Exercising it needs a DOM environment the worker-pool test setup doesn't provide.
+ * TESTED IN test/dom/session-client.spec.ts. Everything below the CSS is ES5 inside a template
+ * literal, so the main suite (workerd — no DOM, no eval) can't reach it; a second vitest project
+ * mounts this markup under jsdom, evaluates this exact script against a fake socket, and drives the
+ * state machine directly. Change the script and those tests change with it — they read `handle`,
+ * `send`, `outbox` and `drafts` out of this scope by name.
  */
 export function renderSession(): string {
 	const css = `

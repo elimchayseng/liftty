@@ -17,6 +17,9 @@ export default defineWorkersConfig({
 		noExternal: ["ai", "@cloudflare/codemode", "@ai-sdk/provider-utils"],
 	},
 	test: {
+		// test/dom/** belongs to the jsdom project (vitest.dom.config.mts) — it drives the /session
+		// client script, which needs a DOM and `eval`, neither of which workerd has.
+		exclude: ["test/dom/**", "**/node_modules/**"],
 		server: {
 			deps: {
 				inline: ["ai", "@cloudflare/codemode", "@ai-sdk/provider-utils"],

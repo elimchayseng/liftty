@@ -1146,10 +1146,9 @@ describe("liftty session logging fixes (BLOCK-VIEW)", () => {
 	 * that the served HTML contains "patchLifts" or "outbox" passes just as happily when the logic is
 	 * inverted or deleted, and reads as coverage it isn't.
 	 *
-	 * The client behaviours those identifiers belong to — patch-vs-rebuild, the draft layer, the
-	 * outbox, prefill precedence — have no automated coverage; the script is ~500 lines of ES5 inside
-	 * a template literal that nothing executes. They are verified by hand in a browser. See the note
-	 * in src/views/session.ts.
+	 * The behaviours those identifiers belong to — patch-vs-rebuild, drafts, the outbox, prefill
+	 * precedence — are tested for real in test/dom/session-client.spec.ts, which runs under jsdom
+	 * (`npm run test:dom`) because workerd has no DOM to execute the script in.
 	 */
 	it("/session ships the markup and frame names the protocol depends on", async () => {
 		const html = await (await SELF.fetch("https://example.com/session")).text();
