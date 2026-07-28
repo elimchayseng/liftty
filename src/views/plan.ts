@@ -1,6 +1,7 @@
 import type { State, SessionRow, Lift, PrescribedDay, ProgramChangeRow } from "../server";
 import type { PluginSummary } from "../training";
-import { renderHead, renderHeader } from "./shared";
+import { renderHead, renderHeader, esc } from "./shared";
+import { topLiftBrief } from "../lifts";
 
 /**
  * Server-rendered /plan — the gym reference page (design-refresh: today-first reskin).
@@ -204,15 +205,6 @@ function renderHeroLift(l: Lift): string {
   </div>`;
 }
 
-/** The lead lift of a day as a one-line target for the "next week" box — "Front Squat 4×8 @ 135". */
-function topLiftBrief(d: PrescribedDay): string {
-	const l = d.lifts[0];
-	if (!l) return "";
-	if (l.kind === "rounds") return `${l.exercise} ${l.sets} rounds`;
-	const load = l.weight != null ? ` @ ${l.weight}${l.perSide ? "/side" : ""}` : l.addedWeight != null ? ` @ BW+${l.addedWeight}` : "";
-	return `${l.exercise} ${l.sets}×${l.reps}${load}`;
-}
-
 /** A saved plugin as a dashed policy row — "name vN · runs every set · 0 tokens" (0 in green). */
 function renderPolicy(p: PluginSummary): string {
 	const badge = p.enabled ? "runs every set" : "disabled";
@@ -233,8 +225,4 @@ function renderSession(s: SessionRow): string {
 	}
 	const sub = summary ? `<span class="rsub">${esc(summary)}</span>` : "";
 	return `<div class="row"><span class="rname">${esc(label)}${sub}</span><span class="date">${esc(s.date)}</span></div>`;
-}
-
-function esc(s: string): string {
-	return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 }

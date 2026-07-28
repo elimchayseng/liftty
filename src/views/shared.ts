@@ -8,6 +8,11 @@
  * atop every page. /flow is the reference and is not rebuilt — it only gains a nav link.
  */
 
+/** HTML-escape a value for interpolation into a server-rendered template literal. */
+export function esc(s: string): string {
+	return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+}
+
 /** Design tokens — single source of truth, mirrored from HANDOFF §2. */
 export const TOKENS = {
 	bg: "#0a0a0b",

@@ -30,6 +30,7 @@ import {
 	type PluginEvent,
 } from "./plugins";
 import { DEMO_PROGRAM, TRAINING_PLAN, AUTO_REGULATE_SOURCE } from "../fixtures";
+import { liftBrief, summarizeSets, sessionStats, topLiftBrief, type LoggedSet, type SessionStats } from "./lifts";
 
 /**
  * liftty — a stateful lifting coach.
@@ -91,7 +92,13 @@ export type State = {
 	};
 	activeSession: null | {
 		startedAt: string;
-		day: string;
+		day: string; // the day's FOCUS ("Front Squat") — still the wire + matching key
+		// `dayLabel` and `week` pin the session to a specific slot in the committed block at START time,
+		// so picking Day B on a Tuesday works and a coach `advanceWeek` mid-workout can't refile the
+		// session into the next week. Optional: DO state persisted before this field must still parse
+		// (onConnect backfills both once).
+		dayLabel?: string; // "Day B"
+		week?: number;
 		loggedSets: { exercise: string; reps: number; weight: number }[];
 	};
 	// Per-user settings persisted in the DO. `restSeconds` is the default rest timer (seconds) between
@@ -155,46 +162,6 @@ export type ProgramChangeRow = {
 	source: string;
 	reason: string | null;
 };
-
-/**
- * Roll an active session's logged sets into one per-exercise summary line for the history row —
- * "Front Squat 4×8 @ 125 · RDL 3×8 @ 115". Groups by exercise in first-logged order; collapses a
- * rep range (5–8) when reps varied; shows the top weight per exercise (0/bodyweight → no load shown).
- */
-function summarizeSets(sets: { exercise: string; reps: number; weight: number }[]): string {
-	const order: string[] = [];
-	const byEx = new Map<string, { reps: number; weight: number }[]>();
-	for (const s of sets) {
-		if (!byEx.has(s.exercise)) {
-			byEx.set(s.exercise, []);
-			order.push(s.exercise);
-		}
-		byEx.get(s.exercise)!.push({ reps: s.reps, weight: s.weight });
-	}
-	return order
-		.map((ex) => {
-			const list = byEx.get(ex)!;
-			const reps = list.map((x) => x.reps);
-			const lo = Math.min(...reps);
-			const hi = Math.max(...reps);
-			const repStr = lo === hi ? `${lo}` : `${lo}–${hi}`;
-			const weights = list.map((x) => x.weight).filter((w) => w > 0);
-			const wStr = weights.length ? ` @ ${Math.max(...weights)}` : "";
-			return `${ex} ${list.length}×${repStr}${wStr}`;
-		})
-		.join(" · ");
-}
-
-/**
- * One-line prescription for a lift — "4×8 @ 125", "3×8 @ 30/side", "4×6 @ BW+10", "3 rounds", "4×6".
- * Used for the composite before→after strings in advanceWeek's audit deltas (a plan-week load can move
- * sets, reps, AND weight at once, so a single weight number can't describe the change).
- */
-function liftBrief(l: Lift): string {
-	const scheme = l.kind === "rounds" ? `${l.sets} rounds` : `${l.sets}×${l.reps}`;
-	const load = l.weight != null ? ` @ ${l.weight}${l.perSide ? "/side" : ""}` : l.addedWeight != null ? ` @ BW+${l.addedWeight}` : "";
-	return scheme + load;
-}
 
 /** One shaped table in the /db read-only snapshot. `rows`/`columns` empty for count-only tables. */
 export type DbTable = { name: string; rowCount: number; columns: string[]; rows: Record<string, unknown>[] };
@@ -328,18 +295,51 @@ function hashProgram(program: State["program"]): string {
 /** The committed baseline program's hash — the target every reset restores to. */
 const DEMO_PROGRAM_HASH = hashProgram(DEMO_PROGRAM as State["program"]);
 
-/** Which program day is "today": the one after the most recently logged session's focus. */
-function todayIndex(days: PrescribedDay[], recent: SessionRow[]): number {
-	if (!days.length || !recent.length) return 0;
+/** The decoded `actuals` blob of a finalized session row. */
+export type SessionActuals = {
+	focus?: string;
+	summary?: string;
+	week?: number;
+	day?: string;
+	/** The training block this session belongs to — see BLOCK_TAG. Absent on seed/synthetic rows. */
+	block?: string;
+	loggedSets?: LoggedSet[];
+};
+
+function parseActuals(row: SessionRow): SessionActuals {
 	try {
-		const last = JSON.parse(recent[0].actuals) as { focus?: string };
-		const i = days.findIndex((d) => d.focus === last.focus);
-		if (i >= 0) return (i + 1) % days.length;
+		return JSON.parse(row.actuals) as SessionActuals;
 	} catch {
-		/* fall through */
+		return {};
 	}
-	return 0;
 }
+
+/**
+ * Stamped into every session finalized while running the committed block, and the ONLY thing that
+ * separates this block's sessions from the seeded history.
+ *
+ * This matters more than it looks: SEED_SESSIONS (the real Dec 2025 – Jan 2026 log) already carries
+ * `week: 1` for Day A, Day B AND Day C. Deriving week completion from `actuals.week` alone would
+ * report "week 1 complete — advance to week 2" on a pristine install. Filtering on the block tag
+ * excludes those rows by construction; filtering on a date cutoff would work only by accident of the
+ * current fixture dates and would rot the moment the block moves.
+ */
+const BLOCK_TAG = TRAINING_PLAN.name;
+
+/** How far through the current plan week the lifter is — which days are logged, and what's next. */
+export type WeekProgress = {
+	week: number;
+	/** Day labels of THIS block + THIS week already finalized, e.g. ["Day A","Day B"]. */
+	doneLabels: string[];
+	/** Index into program.days of the next unlogged day; 0 when the week is complete. */
+	todayIndex: number;
+	/** Every program day for this week has a finalized session. */
+	complete: boolean;
+	/** The finalized row per day label (newest wins), for the /block cells. */
+	sessionsByLabel: Record<string, SessionRow>;
+	/** Extra finalized sessions beyond the first, per day label — a repeated day. */
+	extraByLabel: Record<string, number>;
+};
 
 export class LifttyAgent extends Agent<Env, State> implements Training, PluginAuthoring {
 	initialState = SEED_STATE;
@@ -375,14 +375,11 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 	}
 
 	getHistory(exercise?: string, limit = 10): SessionLog[] {
-		const rows = this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 200`;
+		// 50, not 200: this runs on the logged-set hot path via firePlugins and JSON-parses every row's
+		// `actuals` (which now carries the full loggedSets array). No caller asks for more than 10.
+		const rows = this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 50`;
 		const logs = rows.map((r): SessionLog => {
-			let a: { focus?: string; summary?: string; week?: number; day?: string } = {};
-			try {
-				a = JSON.parse(r.actuals);
-			} catch {
-				/* ignore */
-			}
+			const a = parseActuals(r);
 			return { id: r.id, date: r.date, status: r.status, week: a.week, day: a.day, focus: a.focus, summary: a.summary };
 		});
 		const filtered = exercise
@@ -399,12 +396,21 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 		if (set.weight != null && !Number.isFinite(set.weight)) throw new Error(`logSet: weight must be a finite number (got ${set.weight})`);
 		let active = this.state.activeSession;
 		if (!active) {
-			const recent = this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 1`;
-			const day = this.state.program.days[todayIndex(this.state.program.days, recent)]?.focus ?? "Session";
-			active = { startedAt: new Date().toISOString(), day, loggedSets: [] };
+			const today = this.todayDay();
+			active = {
+				startedAt: new Date().toISOString(),
+				day: today?.focus ?? "Session",
+				dayLabel: today?.day ?? "",
+				week: this.state.program.weekIndex,
+				loggedSets: [],
+			};
 		}
+		// onConnect opens a session merely because /session was loaded, so `startedAt` can be days stale
+		// by the time real work happens — and finalizeSession derives the history row's DATE from it.
+		// Re-stamp on the first actual set so a session is dated when it was lifted, not when it was opened.
+		const startedAt = active.loggedSets.length === 0 ? new Date().toISOString() : active.startedAt;
 		const loggedSets = [...active.loggedSets, { exercise: set.exercise, reps: set.reps, weight: set.weight ?? 0 }];
-		this.setState({ ...this.state, activeSession: { ...active, loggedSets } });
+		this.setState({ ...this.state, activeSession: { ...active, startedAt, loggedSets } });
 		const w = set.weight != null ? ` @ ${set.weight}` : "";
 		return { activeSets: loggedSets.length, message: `Logged ${set.exercise} ${set.reps}${w} (set ${loggedSets.length} of ${active.day})` };
 	}
@@ -578,12 +584,23 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 			this.setState({ ...this.state, activeSession: null });
 			return { ok: false, reason: "no sets logged" };
 		}
-		const day = this.state.program.days.find((d) => d.focus === active.day);
+		// Resolve by LABEL first — two days could share a focus, and the label is what the lifter picked.
+		const day = this.state.program.days.find((d) => d.day === active.dayLabel) ?? this.state.program.days.find((d) => d.focus === active.day);
 		const date = active.startedAt.slice(0, 10);
 		const id = `live-${active.startedAt}`; // startedAt is an ISO instant (ms precision) → unique per session
 		const summary = summarizeSets(active.loggedSets);
-		const week = this.state.program.weekIndex;
-		const actuals = JSON.stringify({ focus: active.day, summary, week, day: day?.day ?? "", loggedSets: active.loggedSets });
+		// File under the week the session STARTED in, not the program's current week — otherwise a coach
+		// (or /block) advancing the week mid-workout retroactively moves this session into the next week.
+		const week = active.week ?? this.state.program.weekIndex;
+		// `block` is what separates this block's sessions from the seeded Dec–Jan history — see BLOCK_TAG.
+		const actuals = JSON.stringify({
+			focus: active.day,
+			summary,
+			week,
+			day: active.dayLabel || day?.day || "",
+			block: BLOCK_TAG,
+			loggedSets: active.loggedSets,
+		});
 		// Snapshot what the program prescribed for this day, so history rows carry plan-vs-actual. This is
 		// the program AT FINALIZE TIME — a mid-session plugin/coach adjustment shows up here, which is the
 		// honest record of what the lifter was being asked to do when they hit Finish.
@@ -619,10 +636,45 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 	// working untouched. Hibernation is automatic — between sets the DO sleeps; the socket stays open
 	// and the alarm (`schedule → restOver`) wakes it. Nothing here opts out (no `hibernate:false`).
 
-	/** The prescribed day treated as "today" — the day after the most recently logged session's focus. */
+	/**
+	 * Which days of a plan week are already in the books, and which one is up next.
+	 *
+	 * Rotation used to be derived globally — "the day after the last logged session's focus, wrapping"
+	 * — which is why logging three sessions left the lifter on week 1 with no signal that the week was
+	 * over. Scoping completion to (block, week) makes "week 1 is done, advance" a state the UI can
+	 * actually render, and makes day order independent of what was logged in some earlier block.
+	 *
+	 * Matching is by day LABEL first ("Day A"), falling back to focus for rows written before
+	 * activeSession carried a label.
+	 */
+	private weekProgress(week = this.state.program.weekIndex): WeekProgress {
+		const days = this.state.program.days;
+		const rows = this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 200`;
+		const sessionsByLabel: Record<string, SessionRow> = {};
+		const extraByLabel: Record<string, number> = {};
+		for (const row of rows) {
+			const a = parseActuals(row);
+			if (a.block !== BLOCK_TAG || a.week !== week) continue;
+			const day = days.find((d) => (a.day ? d.day === a.day : d.focus === a.focus));
+			if (!day) continue;
+			if (sessionsByLabel[day.day]) extraByLabel[day.day] = (extraByLabel[day.day] ?? 0) + 1;
+			else sessionsByLabel[day.day] = row; // rows arrive newest-first, so the first hit wins
+		}
+		const doneLabels = days.filter((d) => sessionsByLabel[d.day]).map((d) => d.day);
+		const next = days.findIndex((d) => !sessionsByLabel[d.day]);
+		return {
+			week,
+			doneLabels,
+			todayIndex: next >= 0 ? next : 0,
+			complete: days.length > 0 && next < 0,
+			sessionsByLabel,
+			extraByLabel,
+		};
+	}
+
+	/** The prescribed day treated as "today" — the first day of the current week not yet logged. */
 	private todayDay(): PrescribedDay {
-		const recent = this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 1`;
-		return this.state.program.days[todayIndex(this.state.program.days, recent)];
+		return this.state.program.days[this.weekProgress().todayIndex];
 	}
 
 	/** A phone opening /session: ensure an active session exists, then send the prescribed day. */
@@ -718,16 +770,33 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 				JSON.stringify({ type: "set_logged", exercise: msg.exercise, reps: msg.reps, weight: msg.weight ?? null, failed: !!msg.failed, ...res }),
 			);
 
-			// M5: persistent, model-authored plugins fire on THIS event — deterministically, zero
-			// tokens, model nowhere in sight. This dispatch site is framing-correction-#2's proof:
-			// the trigger is the WS event, not an agent tool choice.
-			await this.firePlugins({ set: { exercise: msg.exercise, reps: msg.reps, weight: msg.weight }, failed: !!msg.failed });
-
+			// Rest timer BEFORE plugins. firePlugins awaits a Worker Loader isolate round-trip; leaving
+			// rest_started behind it made the countdown visibly start late on every set.
 			const rest = clampRest(msg.rest, this.state.settings?.restSeconds ?? 60);
+			// Cancel the previous set's alarm first. Without this, logging set 2 thirty seconds into a
+			// 60s rest leaves set 1's alarm live — it fires at its original time and the client's
+			// restDone() kills the running countdown and flashes "go" half a minute early.
+			await this.cancelRestAlarms();
 			await this.schedule(rest, "restOver", { exercise: msg.exercise });
 			this.broadcast(JSON.stringify({ type: "rest_started", exercise: msg.exercise, seconds: rest }));
+
+			// M5: persistent, model-authored plugins fire on THIS event — deterministically, zero
+			// tokens, model nowhere in sight. This dispatch site is framing-correction-#2's proof:
+			// the trigger is the WS event, not an agent tool choice. Still awaited (not waitUntil) so
+			// a plugin's program edit is applied before this handler returns.
+			await this.firePlugins({ set: { exercise: msg.exercise, reps: msg.reps, weight: msg.weight }, failed: !!msg.failed });
 		} catch (err) {
 			connection.send(JSON.stringify({ type: "error", message: err instanceof Error ? err.message : String(err) }));
+		}
+	}
+
+	/**
+	 * Disarm every pending rest alarm. Exactly one rest timer is meaningful at a time — the one for the
+	 * set just logged — so a new set supersedes the previous alarm rather than racing it.
+	 */
+	private async cancelRestAlarms(): Promise<void> {
+		for (const s of this.getSchedules()) {
+			if (s.callback === "restOver") await this.cancelSchedule(s.id);
 		}
 	}
 
@@ -790,8 +859,17 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 	 */
 	async firePlugins(input: { set: { exercise: string; reps: number; weight?: number }; failed: boolean }): Promise<void> {
 		try {
-			const prescribed =
-				this.todayDay()?.lifts.find((l) => l.exercise.toLowerCase().includes(input.set.exercise.toLowerCase())) ?? null;
+			// Cheap gate first. Building the event below costs a weekProgress() scan, a program clone and
+			// a history parse — all wasted on the overwhelmingly common zero-plugin path, on every set.
+			const [enabled] = this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM plugins WHERE enabled = 1`;
+			if (!enabled?.n) return;
+			// Resolve the prescription from the session the lifter is ACTUALLY in, not from whatever day
+			// the rotation thinks is next — those diverge as soon as a day can be picked from /block.
+			const active = this.state.activeSession;
+			const day =
+				(active && (this.state.program.days.find((d) => d.day === active.dayLabel) ?? this.state.program.days.find((d) => d.focus === active.day))) ||
+				this.todayDay();
+			const prescribed = day?.lifts.find((l) => l.exercise.toLowerCase().includes(input.set.exercise.toLowerCase())) ?? null;
 			const event: PluginEvent = {
 				set: input.set,
 				failed: input.failed,
@@ -1215,16 +1293,18 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 		plugins: PluginSummary[];
 		recentChanges: ProgramChangeRow[];
 		plan: { totalWeeks: number; label?: string; nextWeekDays?: PrescribedDay[] };
+		week: { index: number; done: string[]; complete: boolean };
 	}> {
 		const recentSessions = this.sql<SessionRow>`
 			SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 10`;
 		const weekIndex = this.state.program.weekIndex;
 		const thisWeek = TRAINING_PLAN.weeks.find((w) => w.week === weekIndex);
 		const nextWeek = TRAINING_PLAN.weeks.find((w) => w.week === weekIndex + 1);
+		const wp = this.weekProgress();
 		return {
 			state: this.state,
 			recentSessions,
-			today: todayIndex(this.state.program.days, recentSessions),
+			today: wp.todayIndex,
 			plugins: this.listPlugins(),
 			recentChanges: this.getProgramChanges(12),
 			plan: {
@@ -1232,6 +1312,7 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 				...(thisWeek?.label ? { label: thisWeek.label } : {}),
 				...(nextWeek ? { nextWeekDays: nextWeek.days } : {}),
 			},
+			week: { index: wp.week, done: wp.doneLabels, complete: wp.complete },
 		};
 	}
 
