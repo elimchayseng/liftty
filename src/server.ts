@@ -2,6 +2,7 @@ import { Agent, getAgentByName, routeAgentRequest, type Connection, type Connect
 import { streamText, stepCountIs } from "ai";
 import { getModel } from "./model";
 import { renderPlan } from "./views/plan";
+import { renderBlock } from "./views/block";
 import { renderChat } from "./views/chat";
 import { renderSession } from "./views/session";
 import { renderLanding } from "./views/landing";
@@ -1683,31 +1684,79 @@ function dbKeyOk(url: URL, env: Env): boolean {
 	return !!env.DB_KEY && url.searchParams.get("key") === env.DB_KEY;
 }
 
+/**
+ * A server-rendered page. `no-store` because every one of these reflects live agent state — without
+ * it a mobile back-navigation serves /plan or /block from the bfcache showing a week the lifter has
+ * already advanced past, or days they've already logged.
+ */
+function html(body: string): Response {
+	return new Response(body, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
+}
+
+/** 303 (not 302) so the redirected request is always a GET — the Post/Redirect/Get half of /block. */
+function seeOther(location: string): Response {
+	return new Response(null, { status: 303, headers: { location, "cache-control": "no-store" } });
+}
+
+/**
+ * /block's POSTs are the app's only unauthenticated mutating requests (they can start or replace a
+ * workout session), so reject cross-origin submissions. Origin is absent on some same-origin form
+ * posts, which is why a missing header passes — this is CSRF hygiene, not an auth boundary.
+ */
+function sameOrigin(request: Request, url: URL): boolean {
+	const origin = request.headers.get("origin");
+	return !origin || origin === url.origin;
+}
+
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url);
 
 		// Landing route (design-refresh): "/" is the entry page; "/plan" remains the reference view.
 		if (url.pathname === "/") {
-			return new Response(renderLanding(), { headers: { "content-type": "text/html; charset=utf-8" } });
+			return html(renderLanding());
 		}
 
 		if (url.pathname === "/plan") {
 			const me = await getAgentByName(env.LifttyAgent, "me");
 			const data = await me.getPlanData();
-			return new Response(renderPlan(data), {
-				headers: { "content-type": "text/html; charset=utf-8" },
-			});
+			return html(renderPlan(data));
+		}
+
+		// The committed block, end to end. GET renders it; POST is the two writes it offers — pick a day
+		// (→ /session) or move the week (→ back here) — answered with a 303 so a reload never re-submits.
+		if (url.pathname === "/block") {
+			const me = await getAgentByName(env.LifttyAgent, "me");
+			if (request.method === "POST") {
+				if (!sameOrigin(request, url)) return new Response("forbidden", { status: 403 });
+				let form: FormData;
+				try {
+					form = await request.formData();
+				} catch {
+					return seeOther("/block?err=bad+form");
+				}
+				const intent = String(form.get("intent") ?? "");
+				if (intent === "day") {
+					const res = await me.startSession({ day: String(form.get("day") ?? "") });
+					return seeOther(res.ok ? "/session" : `/block?err=${encodeURIComponent(res.reason ?? "could not open that day")}`);
+				}
+				if (intent === "week") {
+					const res = await me.setBlockWeek({ week: parseInt(String(form.get("week") ?? ""), 10) });
+					return seeOther(res.ok ? "/block" : `/block?err=${encodeURIComponent(res.reason ?? "could not change week")}`);
+				}
+				return seeOther("/block");
+			}
+			return html(renderBlock(await me.getBlockData(), url.searchParams.get("err")));
 		}
 
 		if (url.pathname === "/chat") {
-			return new Response(renderChat(), { headers: { "content-type": "text/html; charset=utf-8" } });
+			return html(renderChat());
 		}
 
 		// M4: the live workout stage. Server-rendered page opens a raw WS to the agent (routed by the
 		// routeAgentRequest fallthrough below at /agents/liftty-agent/me).
 		if (url.pathname === "/session") {
-			return new Response(renderSession(), { headers: { "content-type": "text/html; charset=utf-8" } });
+			return html(renderSession());
 		}
 
 		// Admin reset for repeatable demos. Disabled unless RESEED_TOKEN is set (safe by default).
@@ -1734,14 +1783,14 @@ export default {
 		// FLOW-LIVE-EVENTS: the live plugin-flow stage. Static bundle regenerated from
 		// plugins-flow-v2.1.html; it opens the same raw WS as /session and renders the event stream.
 		if (url.pathname === "/flow") {
-			return new Response(FLOW_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
+			return html(FLOW_HTML);
 		}
 
 		// FLOW-LIVE-EVENTS: read-only DB explorer. Key-gated (404 without the key → invisible). NOT
 		// linked from any other page. `/db.json` GET = snapshot; POST = ad-hoc read-only query.
 		if (url.pathname === "/db") {
 			if (!dbKeyOk(url, env)) return new Response("Not found", { status: 404 });
-			return new Response(DB_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
+			return html(DB_HTML);
 		}
 		if (url.pathname === "/db.json") {
 			if (!dbKeyOk(url, env)) return new Response("Not found", { status: 404 });

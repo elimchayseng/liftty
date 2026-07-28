@@ -30,6 +30,7 @@ export const TOKENS = {
 /** Nav order (also the sitemap). Landing passes active:"" so nothing is underlined. */
 const NAV: { label: string; href: string }[] = [
 	{ label: "plan", href: "/plan" },
+	{ label: "block", href: "/block" },
 	{ label: "session", href: "/session" },
 	{ label: "chat", href: "/chat" },
 	{ label: "flow", href: "/flow" },
