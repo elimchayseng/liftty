@@ -33,13 +33,22 @@ export type SessionLog = {
 	summary?: string;
 };
 
-export type SetInput = { exercise: string; reps: number; weight?: number };
+/**
+ * `nonce` is an idempotency key minted by the /session client per LOG tap. It is deliberately absent
+ * from the coach's logSet tool schema (which is hand-written with additionalProperties:false) — it
+ * exists for the WebSocket path only, where a frame can be lost on a half-open socket and re-sent.
+ */
+export type SetInput = { exercise: string; reps: number; weight?: number; nonce?: string };
 
 export type ProgramChange =
 	| { op: "deload"; pct?: number }
 	| { op: "setExerciseWeight"; exercise: string; weight: number }
 	| { op: "setExerciseScheme"; exercise: string; sets?: number; reps?: number; exact?: boolean }
 	| { op: "advanceWeek" }
+	// Jump to any week of the committed block, forward or back, clamped to it. Not exposed as a coach
+	// tool — /block drives it server-side via setBlockWeek. advanceWeek stays the model's affordance
+	// (and stays unbounded, so it can walk past the block's last week).
+	| { op: "setWeek"; week: number }
 	| { op: "setPhase"; phase: string; goal?: string };
 
 /** adjustProgram reports exactly which exercises it touched, so the coach can report ground truth. */
@@ -150,7 +159,10 @@ export function buildTrainingTools(t: Training & PluginAuthoring, opts?: { decoy
 				required: ["exercise", "reps"],
 				additionalProperties: false,
 			}),
-			execute: async (set) => t.logSet(set),
+			// Destructure rather than forwarding the raw object: jsonSchema()'s additionalProperties:false
+			// is advisory to the model, not enforced at runtime, so a model-emitted `nonce` would
+			// otherwise reach the WS-only dedupe and turn repeat calls into silent no-ops.
+			execute: async ({ exercise, reps, weight }) => t.logSet({ exercise, reps, weight }),
 		}),
 		adjustProgram: tool({
 			description:

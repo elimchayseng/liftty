@@ -6,14 +6,17 @@
 		"deploy": "wrangler deploy",
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
-		"test": "vitest",
+		"test": "vitest run && vitest run -c vitest.dom.config.mts",
 		"cf-typegen": "wrangler types",
 		"spike": "node scripts/spike-metadata.mts",
-		"measure": "node scripts/measure.mts"
+		"measure": "node scripts/measure.mts",
+		"test:watch": "vitest",
+		"test:dom": "vitest run -c vitest.dom.config.mts"
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "^0.12.4",
 		"@types/node": "^26.1.0",
+		"jsdom": "^26.1.0",
 		"typescript": "^5.5.2",
 		"vitest": "~3.2.0",
 		"wrangler": "^4.107.0"

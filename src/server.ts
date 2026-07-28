@@ -2,6 +2,7 @@ import { Agent, getAgentByName, routeAgentRequest, type Connection, type Connect
 import { streamText, stepCountIs } from "ai";
 import { getModel } from "./model";
 import { renderPlan } from "./views/plan";
+import { renderBlock } from "./views/block";
 import { renderChat } from "./views/chat";
 import { renderSession } from "./views/session";
 import { renderLanding } from "./views/landing";
@@ -30,6 +31,7 @@ import {
 	type PluginEvent,
 } from "./plugins";
 import { DEMO_PROGRAM, TRAINING_PLAN, AUTO_REGULATE_SOURCE } from "../fixtures";
+import { liftBrief, summarizeSets, sessionStats, topLiftBrief, type LoggedSet, type SessionStats } from "./lifts";
 
 /**
  * liftty — a stateful lifting coach.
@@ -91,8 +93,14 @@ export type State = {
 	};
 	activeSession: null | {
 		startedAt: string;
-		day: string;
-		loggedSets: { exercise: string; reps: number; weight: number }[];
+		day: string; // the day's FOCUS ("Front Squat") — still the wire + matching key
+		// `dayLabel` and `week` pin the session to a specific slot in the committed block at START time,
+		// so picking Day B on a Tuesday works and a coach `advanceWeek` mid-workout can't refile the
+		// session into the next week. Optional: DO state persisted before this field must still parse
+		// (onConnect backfills both once).
+		dayLabel?: string; // "Day B"
+		week?: number;
+		loggedSets: LoggedSet[];
 	};
 	// Per-user settings persisted in the DO. `restSeconds` is the default rest timer (seconds) between
 	// logged sets — coach-configurable ("rest 90 seconds") and editable from the /session chip. Optional
@@ -155,46 +163,6 @@ export type ProgramChangeRow = {
 	source: string;
 	reason: string | null;
 };
-
-/**
- * Roll an active session's logged sets into one per-exercise summary line for the history row —
- * "Front Squat 4×8 @ 125 · RDL 3×8 @ 115". Groups by exercise in first-logged order; collapses a
- * rep range (5–8) when reps varied; shows the top weight per exercise (0/bodyweight → no load shown).
- */
-function summarizeSets(sets: { exercise: string; reps: number; weight: number }[]): string {
-	const order: string[] = [];
-	const byEx = new Map<string, { reps: number; weight: number }[]>();
-	for (const s of sets) {
-		if (!byEx.has(s.exercise)) {
-			byEx.set(s.exercise, []);
-			order.push(s.exercise);
-		}
-		byEx.get(s.exercise)!.push({ reps: s.reps, weight: s.weight });
-	}
-	return order
-		.map((ex) => {
-			const list = byEx.get(ex)!;
-			const reps = list.map((x) => x.reps);
-			const lo = Math.min(...reps);
-			const hi = Math.max(...reps);
-			const repStr = lo === hi ? `${lo}` : `${lo}–${hi}`;
-			const weights = list.map((x) => x.weight).filter((w) => w > 0);
-			const wStr = weights.length ? ` @ ${Math.max(...weights)}` : "";
-			return `${ex} ${list.length}×${repStr}${wStr}`;
-		})
-		.join(" · ");
-}
-
-/**
- * One-line prescription for a lift — "4×8 @ 125", "3×8 @ 30/side", "4×6 @ BW+10", "3 rounds", "4×6".
- * Used for the composite before→after strings in advanceWeek's audit deltas (a plan-week load can move
- * sets, reps, AND weight at once, so a single weight number can't describe the change).
- */
-function liftBrief(l: Lift): string {
-	const scheme = l.kind === "rounds" ? `${l.sets} rounds` : `${l.sets}×${l.reps}`;
-	const load = l.weight != null ? ` @ ${l.weight}${l.perSide ? "/side" : ""}` : l.addedWeight != null ? ` @ BW+${l.addedWeight}` : "";
-	return scheme + load;
-}
 
 /** One shaped table in the /db read-only snapshot. `rows`/`columns` empty for count-only tables. */
 export type DbTable = { name: string; rowCount: number; columns: string[]; rows: Record<string, unknown>[] };
@@ -328,17 +296,160 @@ function hashProgram(program: State["program"]): string {
 /** The committed baseline program's hash — the target every reset restores to. */
 const DEMO_PROGRAM_HASH = hashProgram(DEMO_PROGRAM as State["program"]);
 
-/** Which program day is "today": the one after the most recently logged session's focus. */
-function todayIndex(days: PrescribedDay[], recent: SessionRow[]): number {
-	if (!days.length || !recent.length) return 0;
+/** The decoded `actuals` blob of a finalized session row. */
+export type SessionActuals = {
+	focus?: string;
+	summary?: string;
+	week?: number;
+	day?: string;
+	/** The training block this session belongs to — see BLOCK_TAG. Absent on seed/synthetic rows. */
+	block?: string;
+	loggedSets?: LoggedSet[];
+};
+
+function parseActuals(row: SessionRow): SessionActuals {
 	try {
-		const last = JSON.parse(recent[0].actuals) as { focus?: string };
-		const i = days.findIndex((d) => d.focus === last.focus);
-		if (i >= 0) return (i + 1) % days.length;
+		return JSON.parse(row.actuals) as SessionActuals;
 	} catch {
-		/* fall through */
+		return {};
 	}
-	return 0;
+}
+
+/**
+ * Stamped into every session finalized while running the committed block, and the ONLY thing that
+ * separates this block's sessions from the seeded history.
+ *
+ * This matters more than it looks: SEED_SESSIONS (the real Dec 2025 – Jan 2026 log) already carries
+ * `week: 1` for Day A, Day B AND Day C. Deriving week completion from `actuals.week` alone would
+ * report "week 1 complete — advance to week 2" on a pristine install. Filtering on the block tag
+ * excludes those rows by construction; filtering on a date cutoff would work only by accident of the
+ * current fixture dates and would rot the moment the block moves.
+ *
+ * Deliberately the plan's stable `id`, never its `name`: the name is display copy carrying a date
+ * range, and editing it would silently detach every logged session from the block — /block would
+ * empty out and the lifter would be told to repeat work they had already done.
+ */
+const BLOCK_TAG = TRAINING_PLAN.id;
+
+/**
+ * Sessions finalized before the block tag existed carry `{focus, summary, week, day, loggedSets}` and
+ * no `block`, so every week-scoped read would skip them — a lifter who had already logged days of
+ * this block would watch them vanish from /block and /plan on deploy. Their ids are the discriminator:
+ * `finalizeSession` writes `live-<ISO>`, while seed rows use dates and reseed synthetics use `synth-`,
+ * and neither of those belongs to the block. One-time, idempotent, gated by its own meta key.
+ */
+const BLOCK_BACKFILL_VERSION = 1;
+
+/**
+ * The whole decision the backfill makes, as a pure function of one row — so it can be tested against
+ * every shape (a pre-tag block session, a seed row, a reseed synthetic, an already-tagged row) without
+ * a write seam into the DO just for tests.
+ *
+ * Returns the migrated actuals, or null to leave the row alone. Only `live-<ISO>` ids are block
+ * sessions: seed rows use date ids and reseed synthetics use `synth-`, and tagging either would make a
+ * pristine install report "week 1 complete" (SEED_SESSIONS carries week 1 for all three days).
+ */
+export function migrateActuals(id: string, actuals: SessionActuals): SessionActuals | null {
+	if (!id.startsWith("live-")) return null;
+	if (actuals.block != null) return null; // already tagged
+	if (actuals.week == null) return null; // no week to place it in — leave it out of the block
+	return { ...actuals, block: BLOCK_TAG };
+}
+
+/**
+ * How many session rows any history scan looks at. Must comfortably exceed a whole block
+ * (weeks × days) or /block would silently drop its earliest weeks as history accumulates — the
+ * assertion below fails the build rather than letting that regress quietly.
+ */
+const HISTORY_SCAN_LIMIT = 200;
+if (HISTORY_SCAN_LIMIT < TRAINING_PLAN.weeks.length * 3 * 4) {
+	throw new Error(`HISTORY_SCAN_LIMIT ${HISTORY_SCAN_LIMIT} is too small for a ${TRAINING_PLAN.weeks.length}-week block`);
+}
+
+/** How far through the current plan week the lifter is — which days are logged, and what's next. */
+export type WeekProgress = {
+	week: number;
+	/** Day labels of THIS block + THIS week already finalized, e.g. ["Day A","Day B"]. */
+	doneLabels: string[];
+	/** Index into program.days of the next unlogged day; 0 when the week is complete. */
+	todayIndex: number;
+	/** Every program day for this week has a finalized session. */
+	complete: boolean;
+	/** The finalized row per day label (newest wins), for the /block cells. */
+	sessionsByLabel: Record<string, SessionRow>;
+	/** Extra finalized sessions beyond the first, per day label — a repeated day. */
+	extraByLabel: Record<string, number>;
+};
+
+/**
+ * One day-cell in the /block grid.
+ *
+ * `status` is the whole state machine the view renders against:
+ *   done   — a finalized session exists for this (week, day); `date` + `stats` are present
+ *   active — the live session is pinned to this cell right now
+ *   next   — the current week's first unlogged day, i.e. what "today" means
+ *   open   — selectable/unlogged (the current week's later days, or a passed week's gaps)
+ *   future — a week we haven't reached
+ */
+export type BlockCell = {
+	week: number;
+	day: string;
+	focus: string;
+	brief: string;
+	status: "done" | "next" | "open" | "future";
+	/**
+	 * The live session is pinned to this cell. Orthogonal to `status` on purpose — a day can be both
+	 * finished and reopened, and folding the two together made a completed week read as incomplete.
+	 */
+	live?: true;
+	date?: string;
+	stats?: SessionStats;
+	/** Additional finalized sessions in this cell beyond the one shown — a repeated day. */
+	extra?: number;
+};
+
+export type BlockWeek = { week: number; label?: string; current: boolean; complete: boolean; cells: BlockCell[] };
+
+export type BlockView = {
+	name: string;
+	totalWeeks: number;
+	currentWeek: number;
+	/** weekIndex has walked past the last plan week (advanceWeek is unbounded). */
+	beyondBlock: boolean;
+	weeks: BlockWeek[];
+	activeSession: { day: string; dayLabel: string; week: number; sets: number } | null;
+	/** A session has sets logged — day switching and week changes are refused until it's finished. */
+	locked: boolean;
+	weekComplete: boolean;
+};
+
+/**
+ * Load a committed plan week's prescriptions into the working program, appending one composite delta
+ * per lift that actually moved. Shared by `advanceWeek` and `setWeek` — the ops differ only in how
+ * they bound the target week, not in what entering a week means.
+ *
+ * In-week coach/plugin overrides are overwritten BY DESIGN; the deltas (override as `before`, plan as
+ * `after`) keep that legible on the audit trail. Past the last plan week the days are left untouched.
+ * Mutates `program` and `deltas` in place; `moved` counts only the lifts this call touched.
+ */
+function loadPlanWeek(program: State["program"], target: number, deltas: ChangeDelta[]): { loaded: boolean; moved: number; label?: string } {
+	const planWeek = TRAINING_PLAN.weeks.find((w) => w.week === target);
+	if (!planWeek) return { loaded: false, moved: 0 };
+	const before = deltas.length;
+	const oldDays = program.days;
+	program.days = structuredClone(planWeek.days) as PrescribedDay[];
+	for (const d of program.days) {
+		const old = oldDays.find((o) => o.day === d.day);
+		for (const l of d.lifts) {
+			const prev = old?.lifts.find((o) => o.exercise === l.exercise);
+			const beforeBrief = prev ? liftBrief(prev) : null;
+			if (beforeBrief !== liftBrief(l)) deltas.push({ exercise: l.exercise, before: beforeBrief, after: liftBrief(l) });
+		}
+		for (const o of old?.lifts ?? [])
+			if (!d.lifts.some((l) => l.exercise === o.exercise)) deltas.push({ exercise: o.exercise, before: liftBrief(o), after: null });
+	}
+	program.phase = program.phase.replace(/ · deload wk$/, "");
+	return { loaded: true, moved: deltas.length - before, ...(planWeek.label ? { label: planWeek.label } : {}) };
 }
 
 export class LifttyAgent extends Agent<Env, State> implements Training, PluginAuthoring {
@@ -375,14 +486,14 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 	}
 
 	getHistory(exercise?: string, limit = 10): SessionLog[] {
-		const rows = this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 200`;
+		// The `exercise` filter runs after the fetch, so the scan needs headroom above `limit` — but a
+		// flat 200 was wasteful on the logged-set hot path (firePlugins asks for 10 and this parses
+		// every row's actuals, which now carries the full loggedSets array). Scale with the request so
+		// the tool's advertised maximum stays reachable without taxing the common case.
+		const scan = Math.min(HISTORY_SCAN_LIMIT, Math.max(50, Math.floor(limit) * 4));
+		const rows = this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT ${scan}`;
 		const logs = rows.map((r): SessionLog => {
-			let a: { focus?: string; summary?: string; week?: number; day?: string } = {};
-			try {
-				a = JSON.parse(r.actuals);
-			} catch {
-				/* ignore */
-			}
+			const a = parseActuals(r);
 			return { id: r.id, date: r.date, status: r.status, week: a.week, day: a.day, focus: a.focus, summary: a.summary };
 		});
 		const filtered = exercise
@@ -397,14 +508,34 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 		// to null in storage; a non-positive/non-integer rep count is meaningless.)
 		if (!Number.isInteger(set.reps) || set.reps < 1) throw new Error(`logSet: reps must be a positive integer (got ${set.reps})`);
 		if (set.weight != null && !Number.isFinite(set.weight)) throw new Error(`logSet: weight must be a finite number (got ${set.weight})`);
+		// Idempotency. A phone can hold a socket in readyState OPEN whose frames never reach the server
+		// (half-open TCP after a screen lock / network handoff); the lifter sees no receipt, taps LOG
+		// again after the reconnect, and the set lands twice. The nonce makes the retry a no-op. Stored
+		// on the set itself, so this survives DO hibernation rather than living in socket-lifetime memory.
+		if (set.nonce && this.state.activeSession?.loggedSets.some((s) => s.nonce === set.nonce)) {
+			const n = this.state.activeSession.loggedSets.length;
+			return { activeSets: n, message: `Already logged ${set.exercise} (set ${n})` };
+		}
 		let active = this.state.activeSession;
 		if (!active) {
-			const recent = this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 1`;
-			const day = this.state.program.days[todayIndex(this.state.program.days, recent)]?.focus ?? "Session";
-			active = { startedAt: new Date().toISOString(), day, loggedSets: [] };
+			const today = this.todayDay();
+			active = {
+				startedAt: new Date().toISOString(),
+				day: today?.focus ?? "Session",
+				dayLabel: today?.day ?? "",
+				week: this.state.program.weekIndex,
+				loggedSets: [],
+			};
 		}
-		const loggedSets = [...active.loggedSets, { exercise: set.exercise, reps: set.reps, weight: set.weight ?? 0 }];
-		this.setState({ ...this.state, activeSession: { ...active, loggedSets } });
+		// onConnect opens a session merely because /session was loaded, so `startedAt` can be days stale
+		// by the time real work happens — and finalizeSession derives the history row's DATE from it.
+		// Re-stamp on the first actual set so a session is dated when it was lifted, not when it was opened.
+		const startedAt = active.loggedSets.length === 0 ? new Date().toISOString() : active.startedAt;
+		const loggedSets = [
+			...active.loggedSets,
+			{ exercise: set.exercise, reps: set.reps, weight: set.weight ?? 0, ...(set.nonce ? { nonce: set.nonce } : {}) },
+		];
+		this.setState({ ...this.state, activeSession: { ...active, startedAt, loggedSets } });
 		const w = set.weight != null ? ` @ ${set.weight}` : "";
 		return { activeSets: loggedSets.length, message: `Logged ${set.exercise} ${set.reps}${w} (set ${loggedSets.length} of ${active.day})` };
 	}
@@ -489,30 +620,28 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 				const before = program.weekIndex;
 				program.weekIndex += 1;
 				deltas.push({ exercise: null, before, after: program.weekIndex });
-				// The committed plan drives progression: entering a plan week loads its prescriptions
-				// wholesale. In-week coach/plugin overrides are overwritten BY DESIGN — the per-lift
-				// composite deltas below (override as `before`, plan as `after`) keep that legible on the
-				// audit trail. Past the last plan week the days are left untouched.
-				const planWeek = TRAINING_PLAN.weeks.find((w) => w.week === program.weekIndex);
-				if (planWeek) {
-					const oldDays = program.days;
-					program.days = structuredClone(planWeek.days) as PrescribedDay[];
-					for (const d of program.days) {
-						const old = oldDays.find((o) => o.day === d.day);
-						for (const l of d.lifts) {
-							const prev = old?.lifts.find((o) => o.exercise === l.exercise);
-							const beforeBrief = prev ? liftBrief(prev) : null;
-							if (beforeBrief !== liftBrief(l)) deltas.push({ exercise: l.exercise, before: beforeBrief, after: liftBrief(l) });
-						}
-						for (const o of old?.lifts ?? [])
-							if (!d.lifts.some((l) => l.exercise === o.exercise)) deltas.push({ exercise: o.exercise, before: liftBrief(o), after: null });
-					}
-					program.phase = program.phase.replace(/ · deload wk$/, "");
-					const moved = deltas.length - 1;
-					summary = `advance to week ${program.weekIndex}${planWeek.label ? ` · ${planWeek.label}` : ""} · plan loaded (${moved} lift${moved === 1 ? "" : "s"} changed)`;
-				} else {
-					summary = `advance to week ${program.weekIndex} · beyond plan — days unchanged`;
-				}
+				const r = loadPlanWeek(program, program.weekIndex, deltas);
+				summary = r.loaded
+					? `advance to week ${program.weekIndex}${r.label ? ` · ${r.label}` : ""} · plan loaded (${r.moved} lift${r.moved === 1 ? "" : "s"} changed)`
+					: `advance to week ${program.weekIndex} · beyond plan — days unchanged`;
+				break;
+			}
+			case "setWeek": {
+				// Deliberately NOT `advanceWeek` with a computed target: advanceWeek is unbounded (it can
+				// walk past the last plan week to 9, 10, … leaving days untouched), whereas jumping to a
+				// week is a pick from the committed block and is clamped to it. Same body, different bounds.
+				const target = Math.min(TRAINING_PLAN.weeks.length, Math.max(1, Math.floor(Number.isFinite(change.week) ? change.week : program.weekIndex)));
+				const before = program.weekIndex;
+				program.weekIndex = target;
+				// Conditional, unlike advanceWeek's: re-picking the CURRENT week is a legitimate "reset this
+				// week to the committed plan", and when there are no overrides to discard it must record
+				// nothing at all rather than an audit row saying week 3 → week 3.
+				if (before !== target) deltas.push({ exercise: null, before, after: target });
+				const r = loadPlanWeek(program, target, deltas);
+				summary =
+					before === target
+						? `reload week ${target}${r.label ? ` · ${r.label}` : ""} · plan loaded (${r.moved} lift${r.moved === 1 ? "" : "s"} changed)`
+						: `week ${before} → ${target}${r.label ? ` · ${r.label}` : ""} · plan loaded (${r.moved} lift${r.moved === 1 ? "" : "s"} changed)`;
 				break;
 			}
 			case "setPhase": {
@@ -578,12 +707,23 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 			this.setState({ ...this.state, activeSession: null });
 			return { ok: false, reason: "no sets logged" };
 		}
-		const day = this.state.program.days.find((d) => d.focus === active.day);
+		// Resolve by LABEL first — two days could share a focus, and the label is what the lifter picked.
+		const day = this.dayForActive(active);
 		const date = active.startedAt.slice(0, 10);
 		const id = `live-${active.startedAt}`; // startedAt is an ISO instant (ms precision) → unique per session
 		const summary = summarizeSets(active.loggedSets);
-		const week = this.state.program.weekIndex;
-		const actuals = JSON.stringify({ focus: active.day, summary, week, day: day?.day ?? "", loggedSets: active.loggedSets });
+		// File under the week the session STARTED in, not the program's current week — otherwise a coach
+		// (or /block) advancing the week mid-workout retroactively moves this session into the next week.
+		const week = active.week ?? this.state.program.weekIndex;
+		// `block` is what separates this block's sessions from the seeded Dec–Jan history — see BLOCK_TAG.
+		const actuals = JSON.stringify({
+			focus: active.day,
+			summary,
+			week,
+			day: active.dayLabel || day?.day || "",
+			block: BLOCK_TAG,
+			loggedSets: active.loggedSets,
+		});
 		// Snapshot what the program prescribed for this day, so history rows carry plan-vs-actual. This is
 		// the program AT FINALIZE TIME — a mid-session plugin/coach adjustment shows up here, which is the
 		// honest record of what the lifter was being asked to do when they hit Finish.
@@ -619,33 +759,129 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 	// working untouched. Hibernation is automatic — between sets the DO sleeps; the socket stays open
 	// and the alarm (`schedule → restOver`) wakes it. Nothing here opts out (no `hibernate:false`).
 
-	/** The prescribed day treated as "today" — the day after the most recently logged session's focus. */
-	private todayDay(): PrescribedDay {
-		const recent = this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 1`;
-		return this.state.program.days[todayIndex(this.state.program.days, recent)];
+	/**
+	 * Which days of a plan week are already in the books, and which one is up next.
+	 *
+	 * Rotation used to be derived globally — "the day after the last logged session's focus, wrapping"
+	 * — which is why logging three sessions left the lifter on week 1 with no signal that the week was
+	 * over. Scoping completion to (block, week) makes "week 1 is done, advance" a state the UI can
+	 * actually render, and makes day order independent of what was logged in some earlier block.
+	 *
+	 * Matching is by day LABEL first ("Day A"), falling back to focus for rows written before
+	 * activeSession carried a label.
+	 */
+	private weekProgress(week = this.state.program.weekIndex, rows = this.blockRows()): WeekProgress {
+		const days = this.state.program.days;
+		const sessionsByLabel: Record<string, SessionRow> = {};
+		const extraByLabel: Record<string, number> = {};
+		for (const { row, actuals } of rows) {
+			if (actuals.week !== week) continue;
+			const day = this.dayForActuals(actuals);
+			if (!day) continue;
+			if (sessionsByLabel[day.day]) extraByLabel[day.day] = (extraByLabel[day.day] ?? 0) + 1;
+			else sessionsByLabel[day.day] = row; // rows arrive newest-first, so the first hit wins
+		}
+		const doneLabels = days.filter((d) => sessionsByLabel[d.day]).map((d) => d.day);
+		const next = days.findIndex((d) => !sessionsByLabel[d.day]);
+		return {
+			week,
+			doneLabels,
+			todayIndex: next >= 0 ? next : 0,
+			complete: days.length > 0 && next < 0,
+			sessionsByLabel,
+			extraByLabel,
+		};
+	}
+
+	/**
+	 * This block's finalized sessions, newest first, parsed once. Callers that need both a week's
+	 * progress and the rows themselves (getBlockData) pass the result into weekProgress rather than
+	 * paying for a second scan-and-parse of the same blobs.
+	 */
+	private blockRows(): { row: SessionRow; actuals: SessionActuals }[] {
+		return this.sql<SessionRow>`SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT ${HISTORY_SCAN_LIMIT}`
+			.map((row) => ({ row, actuals: parseActuals(row) }))
+			.filter((r) => r.actuals.block === BLOCK_TAG);
+	}
+
+	/**
+	 * The program day a finalized session belongs to. Label first, focus as the fallback for rows
+	 * written before activeSession carried a label. Shared so every reader agrees on the rule — when
+	 * weekProgress and getBlockData disagreed, a label-less row counted toward "week complete" while
+	 * its cell still rendered as unlogged.
+	 */
+	private dayForActuals(a: SessionActuals): PrescribedDay | undefined {
+		return this.state.program.days.find((d) => (a.day ? d.day === a.day : d.focus === a.focus));
+	}
+
+	/** The program day a LIVE session is pinned to — label first, focus as the legacy fallback. */
+	private dayForActive(active: State["activeSession"]): PrescribedDay | undefined {
+		if (!active) return undefined;
+		return this.state.program.days.find((d) => d.day === active.dayLabel) ?? this.state.program.days.find((d) => d.focus === active.day);
+	}
+
+	/** The prescribed day treated as "today" — the first day of the current week not yet logged. */
+	private todayDay(wp = this.weekProgress()): PrescribedDay {
+		return this.state.program.days[wp.todayIndex];
+	}
+
+	/**
+	 * Open a session for today if none exists, and fill in dayLabel/week on one persisted before those
+	 * fields existed. Called from onConnect only — it writes, so no read path may depend on it. Reads
+	 * stay correct without it by going through `dayForActive`, which falls back to focus.
+	 */
+	private ensureSessionShape(wp = this.weekProgress()): void {
+		const active = this.state.activeSession;
+		const today = this.todayDay(wp);
+		if (!active) {
+			this.setState({
+				...this.state,
+				activeSession: {
+					startedAt: new Date().toISOString(),
+					day: today?.focus ?? "Session",
+					dayLabel: today?.day ?? "",
+					week: this.state.program.weekIndex,
+					loggedSets: [],
+				},
+			});
+			return;
+		}
+		if (active.dayLabel != null && active.week != null) return;
+		const day = this.dayForActive(active) ?? today;
+		this.setState({
+			...this.state,
+			activeSession: { ...active, dayLabel: active.dayLabel ?? day?.day ?? "", week: active.week ?? this.state.program.weekIndex },
+		});
+	}
+
+	/**
+	 * The `session_hello` frame: which day the lifter is on, its prescriptions, the live session, and
+	 * where that day sits in the week. Built here rather than inline because two callers need it —
+	 * onConnect sends it to one connection, startSession broadcasts it after a day switch.
+	 */
+	private sessionHello(wp = this.weekProgress()): string {
+		const active = this.state.activeSession;
+		const day = this.dayForActive(active) ?? this.todayDay(wp);
+		return JSON.stringify({
+			type: "session_hello",
+			day: day?.focus ?? "Session",
+			dayLabel: day?.day ?? "",
+			lifts: day?.lifts ?? [],
+			activeSession: active,
+			restSeconds: this.state.settings?.restSeconds ?? 60,
+			week: active?.week ?? this.state.program.weekIndex,
+			weekDone: wp.doneLabels,
+			weekComplete: wp.complete,
+		});
 	}
 
 	/** A phone opening /session: ensure an active session exists, then send the prescribed day. */
 	async onConnect(connection: Connection, _ctx: ConnectionContext): Promise<void> {
-		const today = this.todayDay();
-		if (!this.state.activeSession) {
-			this.setState({
-				...this.state,
-				activeSession: { startedAt: new Date().toISOString(), day: today?.focus ?? "Session", loggedSets: [] },
-			});
-		}
-		const dayFocus = this.state.activeSession?.day ?? today?.focus;
-		const day = this.state.program.days.find((d) => d.focus === dayFocus) ?? today;
-		connection.send(
-			JSON.stringify({
-				type: "session_hello",
-				day: day?.focus ?? "Session",
-				dayLabel: day?.day ?? "",
-				lifts: day?.lifts ?? [],
-				activeSession: this.state.activeSession,
-				restSeconds: this.state.settings?.restSeconds ?? 60,
-			}),
-		);
+		// One scan, reused by the shape fix, the day derivation, and the hello frame. This is the hot
+		// path — the socket drops and reconnects constantly on a phone.
+		const wp = this.weekProgress();
+		this.ensureSessionShape(wp);
+		connection.send(this.sessionHello(wp));
 
 		// FLOW-LIVE-EVENTS: replay the recent event stream to THIS connection only (not a broadcast).
 		// `events` is ORDERED OLDEST-FIRST (we select the newest 24 by id DESC, then reverse) so the
@@ -673,7 +909,18 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 	 * then a rest alarm is scheduled.
 	 */
 	async onMessage(connection: Connection, message: WSMessage): Promise<void> {
-		let msg: { type?: string; exercise?: string; reps?: number; weight?: number; failed?: boolean; rest?: number; seconds?: number; sets?: number };
+		let msg: {
+			type?: string;
+			exercise?: string;
+			reps?: number;
+			weight?: number;
+			failed?: boolean;
+			rest?: number;
+			seconds?: number;
+			sets?: number;
+			day?: string;
+			nonce?: string;
+		};
 		try {
 			msg = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message));
 		} catch {
@@ -700,6 +947,14 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 			}
 			return;
 		}
+		// NEW: switch the live session to another day of the week (Day A/B/C). /block drives this over
+		// HTTP, but the frame keeps an in-/session switcher one component away. startSession broadcasts
+		// the new session_hello on success; the ack here tells THIS client why a refusal happened.
+		if (msg.type === "select_day") {
+			const res = this.startSession({ day: typeof msg.day === "string" ? msg.day : "" });
+			connection.send(JSON.stringify({ type: "select_day_result", ...res }));
+			return;
+		}
 		// NEW: the /session Finish button persists the active workout into permanent history. The result
 		// is sent to THIS connection; on success finalizeSession also broadcasts `session_finalized`.
 		if (msg.type === "session_complete") {
@@ -713,21 +968,90 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 				connection.send(JSON.stringify({ type: "error", message: "log_set needs exercise + reps" }));
 				return;
 			}
-			const res = this.logSet({ exercise: msg.exercise, reps: msg.reps, weight: msg.weight });
+			const before = this.state.activeSession?.loggedSets.length ?? 0;
+			// Bound the nonce at the untrusted boundary — it is persisted into state and into every
+			// finalized session's actuals, and nothing else validates it.
+			const nonce = typeof msg.nonce === "string" && msg.nonce.length <= 64 ? msg.nonce : undefined;
+			const res = this.logSet({ exercise: msg.exercise, reps: msg.reps, weight: msg.weight, nonce });
 			connection.send(
-				JSON.stringify({ type: "set_logged", exercise: msg.exercise, reps: msg.reps, weight: msg.weight ?? null, failed: !!msg.failed, ...res }),
+				JSON.stringify({
+					type: "set_logged",
+					exercise: msg.exercise,
+					reps: msg.reps,
+					weight: msg.weight ?? null,
+					failed: !!msg.failed,
+					...(nonce ? { nonce } : {}),
+					...res,
+				}),
 			);
+			// A deduped retry must not restart the rest timer or re-fire policies — it logged nothing.
+			if ((this.state.activeSession?.loggedSets.length ?? 0) === before) return;
+
+			// Rest timer BEFORE plugins. firePlugins awaits a Worker Loader isolate round-trip; leaving
+			// rest_started behind it made the countdown visibly start late on every set.
+			const rest = clampRest(msg.rest, this.state.settings?.restSeconds ?? 60);
+			// Cancel the previous set's alarm first. Without this, logging set 2 thirty seconds into a
+			// 60s rest leaves set 1's alarm live — it fires at its original time and the client's
+			// restDone() kills the running countdown and flashes "go" half a minute early.
+			await this.cancelRestAlarms();
+			await this.schedule(rest, "restOver", { exercise: msg.exercise });
+			this.broadcast(JSON.stringify({ type: "rest_started", exercise: msg.exercise, seconds: rest }));
 
 			// M5: persistent, model-authored plugins fire on THIS event — deterministically, zero
 			// tokens, model nowhere in sight. This dispatch site is framing-correction-#2's proof:
-			// the trigger is the WS event, not an agent tool choice.
+			// the trigger is the WS event, not an agent tool choice. Still awaited (not waitUntil) so
+			// a plugin's program edit is applied before this handler returns.
 			await this.firePlugins({ set: { exercise: msg.exercise, reps: msg.reps, weight: msg.weight }, failed: !!msg.failed });
-
-			const rest = clampRest(msg.rest, this.state.settings?.restSeconds ?? 60);
-			await this.schedule(rest, "restOver", { exercise: msg.exercise });
-			this.broadcast(JSON.stringify({ type: "rest_started", exercise: msg.exercise, seconds: rest }));
 		} catch (err) {
 			connection.send(JSON.stringify({ type: "error", message: err instanceof Error ? err.message : String(err) }));
+		}
+	}
+
+	/**
+	 * Open (or switch to) a session for a specific day of the current week — the write behind /block's
+	 * day cards and the `select_day` frame. Replaces the derived-rotation-only model: "today" is still
+	 * the default, but the lifter can say "I'm doing Day C" and be believed.
+	 *
+	 * Refuses to switch away from a session that already has sets logged. Those sets belong to a day and
+	 * a week; silently re-labelling them would corrupt history, and silently finalizing on a mis-tap
+	 * would end a workout mid-way. Re-selecting the SAME day is a no-op success, so a double-tap or a
+	 * replayed form POST is harmless.
+	 */
+	startSession(input: { day: string }): { ok: boolean; day?: string; dayLabel?: string; week?: number; reason?: string } {
+		// Coerce at the boundary: this is a public RPC, so `day` can be any JSON value, and the /block
+		// POST handler does not wrap the call — a TypeError here would surface as a 500 instead of the
+		// documented error redirect.
+		const q = typeof input?.day === "string" ? input.day.trim().toLowerCase() : "";
+		if (!q) return { ok: false, reason: "no day given" };
+		const day = this.state.program.days.find((d) => d.day.toLowerCase() === q || d.focus.toLowerCase() === q);
+		if (!day) return { ok: false, reason: `unknown day "${String(input?.day ?? "")}"` };
+
+		const active = this.state.activeSession;
+		// Compare the RESOLVED day, not the raw label: a session persisted before dayLabel existed has
+		// it undefined, which would never match and would push a harmless re-tap into the refusal below.
+		if (active && this.dayForActive(active)?.day === day.day) {
+			return { ok: true, day: day.focus, dayLabel: day.day, week: active.week ?? this.state.program.weekIndex };
+		}
+		if (active && active.loggedSets.length > 0) {
+			return { ok: false, reason: "finish the current session first" };
+		}
+
+		const week = this.state.program.weekIndex;
+		this.setState({
+			...this.state,
+			activeSession: { startedAt: new Date().toISOString(), day: day.focus, dayLabel: day.day, week, loggedSets: [] },
+		});
+		this.broadcast(this.sessionHello());
+		return { ok: true, day: day.focus, dayLabel: day.day, week };
+	}
+
+	/**
+	 * Disarm every pending rest alarm. Exactly one rest timer is meaningful at a time — the one for the
+	 * set just logged — so a new set supersedes the previous alarm rather than racing it.
+	 */
+	private async cancelRestAlarms(): Promise<void> {
+		for (const s of this.getSchedules()) {
+			if (s.callback === "restOver") await this.cancelSchedule(s.id);
 		}
 	}
 
@@ -790,8 +1114,14 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 	 */
 	async firePlugins(input: { set: { exercise: string; reps: number; weight?: number }; failed: boolean }): Promise<void> {
 		try {
-			const prescribed =
-				this.todayDay()?.lifts.find((l) => l.exercise.toLowerCase().includes(input.set.exercise.toLowerCase())) ?? null;
+			// Cheap gate first. Building the event below costs a weekProgress() scan, a program clone and
+			// a history parse — all wasted on the overwhelmingly common zero-plugin path, on every set.
+			const [enabled] = this.sql<{ n: number }>`SELECT COUNT(*) AS n FROM plugins WHERE enabled = 1`;
+			if (!enabled?.n) return;
+			// Resolve the prescription from the session the lifter is ACTUALLY in, not from whatever day
+			// the rotation thinks is next — those diverge as soon as a day can be picked from /block.
+			const day = this.dayForActive(this.state.activeSession) ?? this.todayDay();
+			const prescribed = day?.lifts.find((l) => l.exercise.toLowerCase().includes(input.set.exercise.toLowerCase())) ?? null;
 			const event: PluginEvent = {
 				set: input.set,
 				failed: input.failed,
@@ -874,6 +1204,9 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 			prescribed TEXT NOT NULL DEFAULT '{}',
 			actuals TEXT NOT NULL DEFAULT '{}'
 		)`;
+		// Every history read orders by (date DESC, id DESC); without this the DO's most-called query
+		// full-scans and sorts the table on each session_hello.
+		this.sql`CREATE INDEX IF NOT EXISTS idx_sessions_recent ON sessions (date DESC, id DESC)`;
 		this.sql`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`;
 
 		// M5: the plugin registry — memo exhibit #1, the code storage the platform doesn't provide.
@@ -939,6 +1272,10 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 			authored_plugin TEXT
 		)`;
 
+		// BEFORE the seed gate: an already-seeded DO is exactly the one holding sessions that predate
+		// the block tag, so this must run on the path that returns early below.
+		this.backfillBlockTag();
+
 		const [row] = this.sql<{ value: string }>`SELECT value FROM meta WHERE key = 'seed_version'`;
 		const seeded = row ? parseInt(row.value, 10) : 0;
 		if (seeded >= SEED_VERSION) return; // already seeded — never clobber real edits
@@ -946,6 +1283,28 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 		this.setState(SEED_STATE);
 		this.seedSessions();
 		this.sql`INSERT INTO meta (key, value) VALUES ('seed_version', ${String(SEED_VERSION)})
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value`;
+	}
+
+	/**
+	 * Stamp BLOCK_TAG onto sessions finalized before the tag existed, so a lifter's already-logged
+	 * days survive this deploy instead of silently disappearing from /block and /plan's week strip.
+	 *
+	 * Scoped to `live-%` ids — the shape finalizeSession writes. Seed rows (date ids) and reseed
+	 * synthetics (`synth-%`) must stay untagged: SEED_SESSIONS carries week 1 for all three days, so
+	 * tagging them would make a pristine install report "week 1 complete" and paint Dec-2025 dates
+	 * into a Jul-2026 grid. Idempotent and gated by its own meta key, independent of SEED_VERSION
+	 * (bumping that would call setState(SEED_STATE) and clobber the live program).
+	 */
+	private backfillBlockTag(): void {
+		const [done] = this.sql<{ value: string }>`SELECT value FROM meta WHERE key = 'block_backfill'`;
+		if ((done ? parseInt(done.value, 10) : 0) >= BLOCK_BACKFILL_VERSION) return;
+		for (const row of this.sql<SessionRow>`SELECT * FROM sessions`) {
+			const migrated = migrateActuals(row.id, parseActuals(row));
+			if (!migrated) continue;
+			this.sql`UPDATE sessions SET actuals = ${JSON.stringify(migrated)} WHERE id = ${row.id}`;
+		}
+		this.sql`INSERT INTO meta (key, value) VALUES ('block_backfill', ${String(BLOCK_BACKFILL_VERSION)})
 			ON CONFLICT(key) DO UPDATE SET value = excluded.value`;
 	}
 
@@ -1207,6 +1566,120 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 		return report;
 	}
 
+	/**
+	 * RPC: the whole committed block, shaped for /block — every week × day, what it prescribes, whether
+	 * it's been logged, and the numbers if it has.
+	 *
+	 * Ships one-line `brief`s rather than lift objects on purpose: the full 8 × 3 × ~8 lift tree is tens
+	 * of kilobytes of JSON for data the cards never render. The CURRENT week's cells come from the live
+	 * program rather than the fixture, because that's where in-week coach/plugin overrides live — the
+	 * view claiming to be the source of truth has to show what the lifter will actually be asked to lift.
+	 */
+	async getBlockData(): Promise<BlockView> {
+		const currentWeek = this.state.program.weekIndex;
+		const active = this.state.activeSession;
+		const locked = (active?.loggedSets.length ?? 0) > 0;
+
+		// ONE scan of this block's history, shared with weekProgress below — cells look themselves up
+		// instead of rescanning per cell, and a repeated day resolves deterministically (newest wins
+		// + a count). Day resolution goes through dayForActuals so a row written without a label is
+		// placed here exactly as weekProgress places it; when the two disagreed, such a row counted
+		// toward "week complete" while its cell still rendered unlogged.
+		const rows = this.blockRows();
+		const byKey = new Map<string, { row: SessionRow; actuals: SessionActuals; extra: number }>();
+		for (const { row, actuals: a } of rows) {
+			if (a.week == null) continue;
+			const label = this.dayForActuals(a)?.day ?? a.day;
+			if (!label) continue;
+			const key = `${a.week}|${label}`;
+			const hit = byKey.get(key);
+			if (hit) hit.extra += 1;
+			else byKey.set(key, { row, actuals: a, extra: 0 });
+		}
+
+		const wp = this.weekProgress(currentWeek, rows);
+		const activeLabel = this.dayForActive(active)?.day;
+		const weeks: BlockWeek[] = TRAINING_PLAN.weeks.map((w) => {
+			const current = w.week === currentWeek;
+			const days = current ? this.state.program.days : w.days;
+			const cells: BlockCell[] = days.map((d, i) => {
+				const hit = byKey.get(`${w.week}|${d.day}`);
+				const status: BlockCell["status"] = hit
+					? "done"
+					: !current
+						? w.week < currentWeek
+							? "open" // a week we've moved past with this day never logged
+							: "future"
+						: i === wp.todayIndex
+							? "next"
+							: "open";
+				return {
+					week: w.week,
+					day: d.day,
+					focus: d.focus,
+					brief: topLiftBrief(d),
+					// `done` outranks `active`. onConnect opens a session on today's day, and today is
+					// index 0 once the week is complete — so merely loading /session used to knock the
+					// ✓ off a finished Day A and drop the week back to "2/3 done". `live` carries the
+					// in-progress marker separately.
+					status,
+					...(active && current && activeLabel === d.day ? { live: true as const } : {}),
+					...(hit ? { date: hit.row.date, stats: sessionStats(hit.actuals.loggedSets ?? []) } : {}),
+					...(hit && hit.extra ? { extra: hit.extra } : {}),
+				};
+			});
+			return {
+				week: w.week,
+				...(w.label ? { label: w.label } : {}),
+				current,
+				complete: cells.length > 0 && cells.every((c) => c.status === "done"),
+				cells,
+			};
+		});
+
+		return {
+			name: TRAINING_PLAN.name,
+			totalWeeks: TRAINING_PLAN.weeks.length,
+			currentWeek,
+			// advanceWeek is unbounded, so the program can sit past the last plan week. /block renders a
+			// "beyond the block" state for that rather than pretending week 9 has cells.
+			beyondBlock: currentWeek > TRAINING_PLAN.weeks.length,
+			weeks,
+			activeSession: active
+				? { day: active.day, dayLabel: active.dayLabel ?? "", week: active.week ?? currentWeek, sets: active.loggedSets.length }
+				: null,
+			locked,
+			weekComplete: wp.complete,
+		};
+	}
+
+	/**
+	 * RPC: move the block to a specific week — the write behind /block's ADVANCE and GO TO WEEK buttons.
+	 * Manual by design; nothing in the app advances the week on the lifter's behalf.
+	 *
+	 * Blocked while a session has sets logged, for the same reason as startSession: those sets are filed
+	 * under the week they were started in, and changing the program underneath them mid-workout would
+	 * leave the /session screen prescribing a different week's weights than the one being logged.
+	 */
+	setBlockWeek(input: { week: number }): { ok: boolean; week?: number; reason?: string } {
+		const week = Math.floor(Number(input?.week));
+		if (!Number.isFinite(week) || week < 1 || week > TRAINING_PLAN.weeks.length) {
+			return { ok: false, reason: `week must be 1–${TRAINING_PLAN.weeks.length}` };
+		}
+		const active = this.state.activeSession;
+		if (active && active.loggedSets.length > 0) return { ok: false, reason: "finish the current session first" };
+
+		this.adjustProgram({ op: "setWeek", week }, { source: "lifter", reason: "picked from block view" });
+		// Drop an empty session so the next /session open re-derives the day from the new week rather
+		// than resuming a stale one pinned to the week we just left.
+		if (active) this.setState({ ...this.state, activeSession: null });
+		// Tell any open /session tab, the same way startSession does. Weeks 1–7 share an exercise list,
+		// so without this the tab silently repaints the new week's weights while still labelled the old
+		// week — and the next LOG lands on whatever day the server re-derives, not the one on screen.
+		this.broadcast(this.sessionHello());
+		return { ok: true, week };
+	}
+
 	/** RPC: everything the /plan view needs, in one round-trip. */
 	async getPlanData(): Promise<{
 		state: State;
@@ -1215,16 +1688,18 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 		plugins: PluginSummary[];
 		recentChanges: ProgramChangeRow[];
 		plan: { totalWeeks: number; label?: string; nextWeekDays?: PrescribedDay[] };
+		week: { index: number; done: string[]; complete: boolean };
 	}> {
 		const recentSessions = this.sql<SessionRow>`
 			SELECT * FROM sessions ORDER BY date DESC, id DESC LIMIT 10`;
 		const weekIndex = this.state.program.weekIndex;
 		const thisWeek = TRAINING_PLAN.weeks.find((w) => w.week === weekIndex);
 		const nextWeek = TRAINING_PLAN.weeks.find((w) => w.week === weekIndex + 1);
+		const wp = this.weekProgress();
 		return {
 			state: this.state,
 			recentSessions,
-			today: todayIndex(this.state.program.days, recentSessions),
+			today: wp.todayIndex,
 			plugins: this.listPlugins(),
 			recentChanges: this.getProgramChanges(12),
 			plan: {
@@ -1232,6 +1707,7 @@ export class LifttyAgent extends Agent<Env, State> implements Training, PluginAu
 				...(thisWeek?.label ? { label: thisWeek.label } : {}),
 				...(nextWeek ? { nextWeekDays: nextWeek.days } : {}),
 			},
+			week: { index: wp.week, done: wp.doneLabels, complete: wp.complete },
 		};
 	}
 
@@ -1359,31 +1835,79 @@ function dbKeyOk(url: URL, env: Env): boolean {
 	return !!env.DB_KEY && url.searchParams.get("key") === env.DB_KEY;
 }
 
+/**
+ * A server-rendered page. `no-store` because every one of these reflects live agent state — without
+ * it a mobile back-navigation serves /plan or /block from the bfcache showing a week the lifter has
+ * already advanced past, or days they've already logged.
+ */
+function html(body: string): Response {
+	return new Response(body, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
+}
+
+/** 303 (not 302) so the redirected request is always a GET — the Post/Redirect/Get half of /block. */
+function seeOther(location: string): Response {
+	return new Response(null, { status: 303, headers: { location, "cache-control": "no-store" } });
+}
+
+/**
+ * /block's POSTs are the app's only unauthenticated mutating requests (they can start or replace a
+ * workout session), so reject cross-origin submissions. Origin is absent on some same-origin form
+ * posts, which is why a missing header passes — this is CSRF hygiene, not an auth boundary.
+ */
+function sameOrigin(request: Request, url: URL): boolean {
+	const origin = request.headers.get("origin");
+	return !origin || origin === url.origin;
+}
+
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url);
 
 		// Landing route (design-refresh): "/" is the entry page; "/plan" remains the reference view.
 		if (url.pathname === "/") {
-			return new Response(renderLanding(), { headers: { "content-type": "text/html; charset=utf-8" } });
+			return html(renderLanding());
 		}
 
 		if (url.pathname === "/plan") {
 			const me = await getAgentByName(env.LifttyAgent, "me");
 			const data = await me.getPlanData();
-			return new Response(renderPlan(data), {
-				headers: { "content-type": "text/html; charset=utf-8" },
-			});
+			return html(renderPlan(data));
+		}
+
+		// The committed block, end to end. GET renders it; POST is the two writes it offers — pick a day
+		// (→ /session) or move the week (→ back here) — answered with a 303 so a reload never re-submits.
+		if (url.pathname === "/block") {
+			const me = await getAgentByName(env.LifttyAgent, "me");
+			if (request.method === "POST") {
+				if (!sameOrigin(request, url)) return new Response("forbidden", { status: 403 });
+				let form: FormData;
+				try {
+					form = await request.formData();
+				} catch {
+					return seeOther("/block?err=bad+form");
+				}
+				const intent = String(form.get("intent") ?? "");
+				if (intent === "day") {
+					const res = await me.startSession({ day: String(form.get("day") ?? "") });
+					return seeOther(res.ok ? "/session" : `/block?err=${encodeURIComponent(res.reason ?? "could not open that day")}`);
+				}
+				if (intent === "week") {
+					const res = await me.setBlockWeek({ week: parseInt(String(form.get("week") ?? ""), 10) });
+					return seeOther(res.ok ? "/block" : `/block?err=${encodeURIComponent(res.reason ?? "could not change week")}`);
+				}
+				return seeOther("/block");
+			}
+			return html(renderBlock(await me.getBlockData(), url.searchParams.get("err")));
 		}
 
 		if (url.pathname === "/chat") {
-			return new Response(renderChat(), { headers: { "content-type": "text/html; charset=utf-8" } });
+			return html(renderChat());
 		}
 
 		// M4: the live workout stage. Server-rendered page opens a raw WS to the agent (routed by the
 		// routeAgentRequest fallthrough below at /agents/liftty-agent/me).
 		if (url.pathname === "/session") {
-			return new Response(renderSession(), { headers: { "content-type": "text/html; charset=utf-8" } });
+			return html(renderSession());
 		}
 
 		// Admin reset for repeatable demos. Disabled unless RESEED_TOKEN is set (safe by default).
@@ -1410,14 +1934,14 @@ export default {
 		// FLOW-LIVE-EVENTS: the live plugin-flow stage. Static bundle regenerated from
 		// plugins-flow-v2.1.html; it opens the same raw WS as /session and renders the event stream.
 		if (url.pathname === "/flow") {
-			return new Response(FLOW_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
+			return html(FLOW_HTML);
 		}
 
 		// FLOW-LIVE-EVENTS: read-only DB explorer. Key-gated (404 without the key → invisible). NOT
 		// linked from any other page. `/db.json` GET = snapshot; POST = ad-hoc read-only query.
 		if (url.pathname === "/db") {
 			if (!dbKeyOk(url, env)) return new Response("Not found", { status: 404 });
-			return new Response(DB_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
+			return html(DB_HTML);
 		}
 		if (url.pathname === "/db.json") {
 			if (!dbKeyOk(url, env)) return new Response("Not found", { status: 404 });

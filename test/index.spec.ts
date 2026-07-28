@@ -2,6 +2,9 @@ import { SELF, env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import { getAgentByName } from "agents";
 import { TRAINING_PLAN } from "../fixtures";
+import { migrateActuals } from "../src/server";
+import { liftBrief, topLiftBrief, summarizeSets, sessionStats } from "../src/lifts";
+import { buildTrainingTools } from "../src/training";
 
 // Grab a typed RPC handle to a named LifttyAgent DO (its own per-name SQLite DB → test isolation).
 // `getAgentByName` wakes the DO and routes exactly like production, so onStart() (table creation +
@@ -771,5 +774,591 @@ describe("liftty coach token usage (REAL-TOKEN-USAGE)", () => {
 		expect(mu.rowCount).toBe(50);
 		// newest-first: the most recent row carries the authored plugin name
 		expect(mu.rows[0].authored_plugin).toBe("auto-regulate");
+	});
+});
+
+/**
+ * A live WebSocket to a named DO, so tests can drive the REAL onMessage dispatch rather than calling
+ * the RPC methods it happens to delegate to. `sendAndWait` resolves on the first frame matching a
+ * predicate; `seen` accumulates everything for after-the-fact assertions.
+ */
+async function openSocket(name: string) {
+	const resp = await SELF.fetch(`https://example.com/agents/liftty-agent/${name}`, { headers: { Upgrade: "websocket" } });
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	const ws = (resp as any).webSocket as WebSocket | null;
+	if (!ws) throw new Error("no webSocket on upgrade response");
+	ws.accept();
+	const seen: Record<string, unknown>[] = [];
+	ws.addEventListener("message", (e: MessageEvent) => {
+		try {
+			seen.push(JSON.parse(typeof e.data === "string" ? e.data : ""));
+		} catch {
+			/* ignore non-JSON */
+		}
+	});
+	return {
+		seen,
+		settle: () => new Promise((r) => setTimeout(r, 120)),
+		close: () => {
+			try {
+				ws.close();
+			} catch {
+				/* already closed */
+			}
+		},
+		sendAndWait(frame: Record<string, unknown>, match: (m: Record<string, unknown>) => boolean) {
+			return new Promise<Record<string, unknown>>((resolve, reject) => {
+				const timer = setTimeout(() => reject(new Error(`no frame matched after sending ${JSON.stringify(frame)}`)), 5000);
+				const on = (e: MessageEvent) => {
+					let m: Record<string, unknown>;
+					try {
+						m = JSON.parse(typeof e.data === "string" ? e.data : "");
+					} catch {
+						return;
+					}
+					if (!match(m)) return;
+					clearTimeout(timer);
+					ws.removeEventListener("message", on as never);
+					resolve(m);
+				};
+				ws.addEventListener("message", on as never);
+				ws.send(JSON.stringify(frame));
+			});
+		},
+	};
+}
+
+// BLOCK-VIEW: week-scoped progress, explicit day selection, week navigation, and the /block route.
+describe("liftty block view + week progression (BLOCK-VIEW)", () => {
+	/** Log `n` sets on the currently-active day and finalize it. */
+	async function logDay(a: Awaited<ReturnType<typeof agent>>, day: string, sets = 2) {
+		const started = await a.startSession({ day });
+		expect(started.ok).toBe(true);
+		for (let i = 0; i < sets; i++) a.logSet({ exercise: started.day, reps: 5, weight: 100 });
+		return await a.finalizeSession();
+	}
+
+	// (a) THE regression guard for this change. SEED_SESSIONS carries `week: 1` for Day A, Day B AND
+	// Day C, so deriving week completion from actuals.week alone reports "week 1 complete — advance"
+	// on a pristine install. Only the `block` tag written by finalizeSession separates them.
+	it("ignores the seeded pre-block history when measuring week progress", async () => {
+		const a = await agent("wp-pristine");
+		await a.reseed();
+		const plan = await a.getPlanData();
+		expect(plan.week).toEqual({ index: 1, done: [], complete: false });
+		expect(plan.today).toBe(0); // Day A is up, not "the day after the last seeded session"
+		const block = await a.getBlockData();
+		expect(block.weekComplete).toBe(false);
+		expect(block.weeks[0].cells.every((c: { status: string }) => c.status !== "done")).toBe(true);
+	});
+
+	it("marks a day done once finalized, and the week complete after all three", async () => {
+		const a = await agent("wp-complete");
+		await a.reseed();
+		await logDay(a, "Day A");
+		expect((await a.getPlanData()).week).toEqual({ index: 1, done: ["Day A"], complete: false });
+		await logDay(a, "Day B");
+		await logDay(a, "Day C");
+		const plan = await a.getPlanData();
+		expect(plan.week).toEqual({ index: 1, done: ["Day A", "Day B", "Day C"], complete: true });
+		expect((await a.getBlockData()).weekComplete).toBe(true);
+	});
+
+	// (b) Day selection. Blocking mid-session is the whole reason activeSession carries a day identity.
+	it("startSession pins the chosen day, no-ops on a repeat, and refuses to switch mid-session", async () => {
+		const a = await agent("start-session");
+		await a.reseed();
+		expect(await a.startSession({ day: "nope" })).toMatchObject({ ok: false });
+
+		const b = await a.startSession({ day: "Day B" });
+		expect(b).toMatchObject({ ok: true, day: "Incline Bench", dayLabel: "Day B", week: 1 });
+		// Selecting by focus works too, and re-selecting the same day is an idempotent success.
+		expect(await a.startSession({ day: "Incline Bench" })).toMatchObject({ ok: true, dayLabel: "Day B" });
+
+		await a.logSet({ exercise: "Incline Bench", reps: 8, weight: 100 });
+		expect(await a.startSession({ day: "Day C" })).toEqual({ ok: false, reason: "finish the current session first" });
+		// The refusal left the live session untouched.
+		expect((await a.getBlockData()).activeSession).toMatchObject({ dayLabel: "Day B", week: 1, sets: 1 });
+	});
+
+	// (c) A coach advancing the week mid-workout must not retroactively refile the session.
+	it("files a session under the week it was started in, not the week it was finished in", async () => {
+		const a = await agent("session-week");
+		await a.reseed();
+		await a.startSession({ day: "Day A" });
+		await a.logSet({ exercise: "Front Squat", reps: 5, weight: 125 });
+		await a.adjustProgram({ op: "advanceWeek" }); // coach moves the block mid-session
+		await a.finalizeSession();
+		expect((await a.getHistory("Front Squat", 1))[0].week).toBe(1);
+		// …and week 2 (now current) is correctly empty.
+		expect((await a.getPlanData()).week).toEqual({ index: 2, done: [], complete: false });
+	});
+
+	// (d) setWeek vs advanceWeek: shared body, deliberately different bounds.
+	it("setWeek jumps forward and back within the block, clamped, while advanceWeek stays unbounded", async () => {
+		const a = await agent("set-week");
+		await a.reseed();
+		await a.adjustProgram({ op: "setWeek", week: 5 }, { source: "lifter" });
+		expect((await a.getProgram()).weekIndex).toBe(5);
+		await a.adjustProgram({ op: "setWeek", week: 3 }, { source: "lifter" });
+		const p = await a.getProgram();
+		expect(p.weekIndex).toBe(3);
+		// Week 3's committed prescriptions were loaded, not week 5's.
+		expect(p.days[0].lifts[0].weight).toBe(TRAINING_PLAN.weeks[2].days[0].lifts[0].weight);
+
+		await a.adjustProgram({ op: "setWeek", week: 99 }, { source: "lifter" });
+		expect((await a.getProgram()).weekIndex).toBe(TRAINING_PLAN.weeks.length);
+		await a.adjustProgram({ op: "setWeek", week: 0 }, { source: "lifter" });
+		expect((await a.getProgram()).weekIndex).toBe(1);
+
+		// advanceWeek is NOT setWeek(n+1): it still walks past the end of the block.
+		await a.adjustProgram({ op: "setWeek", week: 8 }, { source: "lifter" });
+		await a.adjustProgram({ op: "advanceWeek" });
+		expect((await a.getProgram()).weekIndex).toBe(9);
+		expect((await a.getBlockData()).beyondBlock).toBe(true);
+	});
+
+	it("records one lifter-sourced change per real week move and nothing for a no-op reload", async () => {
+		const a = await agent("set-week-audit");
+		await a.reseed();
+		await a.adjustProgram({ op: "setWeek", week: 4 }, { source: "lifter", reason: "picked from block view" });
+		const changes = await a.getProgramChanges(10);
+		expect(changes.length).toBe(1);
+		expect(changes[0]).toMatchObject({ op: "setWeek", source: "lifter", reason: "picked from block view" });
+
+		// Re-picking the CURRENT week with no in-week overrides to discard must record nothing —
+		// otherwise every /block visit that lands on the current week writes a "week 4 → week 4" row.
+		await a.adjustProgram({ op: "setWeek", week: 4 }, { source: "lifter" });
+		expect((await a.getProgramChanges(10)).length).toBe(1);
+
+		// But it IS a real "reset this week to the plan" when there are overrides.
+		await a.adjustProgram({ op: "setExerciseWeight", exercise: "Front Squat", weight: 999 });
+		await a.adjustProgram({ op: "setWeek", week: 4 }, { source: "lifter" });
+		const after = await a.getProgramChanges(10);
+		expect(after[0].op).toBe("setWeek");
+		expect(after[0].summary).toContain("reload week 4");
+	});
+
+	// (e) getBlockData: the shape /block renders, including hand-checked stats.
+	it("getBlockData reports every week x day with stats on completed cells", async () => {
+		const a = await agent("block-data");
+		await a.reseed();
+		await a.startSession({ day: "Day A" });
+		await a.logSet({ exercise: "Front Squat", reps: 8, weight: 125 });
+		await a.logSet({ exercise: "Front Squat", reps: 8, weight: 130 });
+		await a.logSet({ exercise: "RDL", reps: 10, weight: 100 });
+		await a.finalizeSession();
+
+		const b = await a.getBlockData();
+		expect(b.weeks.length).toBe(TRAINING_PLAN.weeks.length);
+		expect(b.weeks.every((w: { cells: unknown[] }) => w.cells.length === 3)).toBe(true);
+		expect(b.currentWeek).toBe(1);
+		expect(b.weeks[0].current).toBe(true);
+
+		const cell = b.weeks[0].cells[0];
+		expect(cell).toMatchObject({ week: 1, day: "Day A", focus: "Front Squat", status: "done" });
+		expect(cell.brief).toContain("Front Squat");
+		// 8×125 + 8×130 + 10×100 = 1000 + 1040 + 1000
+		expect(cell.stats).toMatchObject({ sets: 3, volume: 3040 });
+		expect(cell.stats.top[0]).toEqual({ exercise: "Front Squat", weight: 130, reps: 8 });
+		// Day B is the next unlogged day of the current week; a future week is neither.
+		expect(b.weeks[0].cells[1].status).toBe("next");
+		expect(b.weeks[3].cells[0].status).toBe("future");
+		expect(b.locked).toBe(false);
+	});
+
+	it("locks day switching and week changes while a session has sets logged", async () => {
+		const a = await agent("block-lock");
+		await a.reseed();
+		await a.startSession({ day: "Day A" });
+		await a.logSet({ exercise: "Front Squat", reps: 5, weight: 125 });
+		expect((await a.getBlockData()).locked).toBe(true);
+		expect(await a.setBlockWeek({ week: 2 })).toEqual({ ok: false, reason: "finish the current session first" });
+		expect((await a.getProgram()).weekIndex).toBe(1);
+		// Out-of-range weeks are refused before the session check even matters.
+		await a.finalizeSession();
+		expect(await a.setBlockWeek({ week: 99 })).toMatchObject({ ok: false });
+		expect(await a.setBlockWeek({ week: 2 })).toEqual({ ok: true, week: 2 });
+	});
+
+	// (f) The route: GET renders, POST mutates behind a same-origin check and answers with a 303.
+	it("serves /block and round-trips both POST intents as redirects", async () => {
+		const res = await SELF.fetch("https://example.com/block");
+		expect(res.status).toBe(200);
+		expect(res.headers.get("cache-control")).toBe("no-store");
+		const html = await res.text();
+		expect(html).toContain("week 8");
+		expect(html).toContain("RETEST");
+		expect(html).toContain('name="intent"');
+
+		const day = await SELF.fetch("https://example.com/block", {
+			method: "POST",
+			headers: { origin: "https://example.com", "content-type": "application/x-www-form-urlencoded" },
+			body: "intent=day&day=Day+B",
+			redirect: "manual",
+		});
+		expect(day.status).toBe(303);
+		expect(day.headers.get("location")).toBe("/session");
+
+		const week = await SELF.fetch("https://example.com/block", {
+			method: "POST",
+			headers: { origin: "https://example.com", "content-type": "application/x-www-form-urlencoded" },
+			body: "intent=week&week=2",
+			redirect: "manual",
+		});
+		expect(week.status).toBe(303);
+		expect(week.headers.get("location")).toBe("/block");
+
+		// A refusal round-trips its reason through the redirect rather than 500ing.
+		const bad = await SELF.fetch("https://example.com/block", {
+			method: "POST",
+			headers: { origin: "https://example.com", "content-type": "application/x-www-form-urlencoded" },
+			body: "intent=week&week=99",
+			redirect: "manual",
+		});
+		expect(bad.headers.get("location")).toContain("/block?err=");
+	});
+
+	it("rejects a cross-origin POST to /block", async () => {
+		const res = await SELF.fetch("https://example.com/block", {
+			method: "POST",
+			headers: { origin: "https://evil.example", "content-type": "application/x-www-form-urlencoded" },
+			body: "intent=week&week=5",
+			redirect: "manual",
+		});
+		expect(res.status).toBe(403);
+	});
+
+	it("links /block from the landing page and the shared nav", async () => {
+		expect(await (await SELF.fetch("https://example.com/")).text()).toContain('href="/block"');
+		expect(await (await SELF.fetch("https://example.com/plan")).text()).toContain('href="/block"');
+	});
+
+	// /plan leads with today until the week is done, then leads with the block's next move — repeating
+	// a finished day as "today" is exactly the confusion this change exists to remove.
+	it("/plan shows the week strip, and swaps START SESSION for the advance CTA once the week is done", async () => {
+		// /plan reads the shared "me" DO, which earlier route tests have written to — reset so this
+		// asserts on a known week rather than on test ordering.
+		const me = await agent("me");
+		await me.reseed();
+
+		const mid = await (await SELF.fetch("https://example.com/plan")).text();
+		expect(mid).toContain('class="wkstrip"');
+		expect(mid).toContain("START SESSION");
+		expect(mid).not.toContain("advance the block");
+
+		for (const day of ["Day A", "Day B", "Day C"]) {
+			const s = await me.startSession({ day });
+			await me.logSet({ exercise: s.day, reps: 5, weight: 100 });
+			await me.finalizeSession();
+		}
+		const done = await (await SELF.fetch("https://example.com/plan")).text();
+		expect(done).toContain("complete — advance the block");
+		expect(done).not.toContain("START SESSION");
+	});
+});
+
+// SESSION-FIXES: the logged-set hot path and the /session client contract.
+describe("liftty session logging fixes (BLOCK-VIEW)", () => {
+	// A repeated frame after a half-open socket must not log the set twice.
+	it("dedupes a re-sent log_set by nonce", async () => {
+		const a = await agent("nonce-dedupe");
+		await a.reseed();
+		await a.startSession({ day: "Day A" });
+		expect((await a.logSet({ exercise: "Front Squat", reps: 5, weight: 125, nonce: "n1" })).activeSets).toBe(1);
+		expect((await a.logSet({ exercise: "Front Squat", reps: 5, weight: 125, nonce: "n1" })).activeSets).toBe(1);
+		// A different nonce is a genuinely different set, even with identical numbers.
+		expect((await a.logSet({ exercise: "Front Squat", reps: 5, weight: 125, nonce: "n2" })).activeSets).toBe(2);
+		// And a set with no nonce (the coach's logSet tool) is never deduped.
+		expect((await a.logSet({ exercise: "Front Squat", reps: 5, weight: 125 })).activeSets).toBe(3);
+	});
+
+	// startedAt drives both the history row's date and its id, and onConnect stamps it when /session is
+	// merely OPENED. Opening the page Monday and lifting Wednesday used to file the session on Monday.
+	it("dates a session from its first logged set, not from when the page was opened", async () => {
+		const a = await agent("started-at");
+		await a.reseed();
+		await a.startSession({ day: "Day A" }); // session "opened" here
+		const opened = Date.now();
+		await new Promise((r) => setTimeout(r, 25));
+		await a.logSet({ exercise: "Front Squat", reps: 5, weight: 125 });
+		const { id } = await a.finalizeSession();
+		// The id is `live-<startedAt>` — parse it back out and check it was stamped at LOG time.
+		expect(Date.parse(String(id).slice("live-".length))).toBeGreaterThanOrEqual(opened + 20);
+	});
+
+	// Driven through real log_set FRAMES, not by replaying the cancel/schedule pair the handler runs —
+	// the regression (set 2 leaving set 1's alarm armed, so it fires early and kills the countdown)
+	// lives in onMessage's ordering, and a test that performs that ordering itself proves nothing.
+	it("arms exactly one rest alarm across consecutive logged sets", async () => {
+		const a = await agent("rest-alarm");
+		await a.reseed();
+		await a.startSession({ day: "Day A" });
+		const ws = await openSocket("rest-alarm");
+		for (const nonce of ["a", "b", "c"]) {
+			await ws.sendAndWait({ type: "log_set", exercise: "Front Squat", reps: 5, weight: 125, nonce }, (m) => m.type === "set_logged");
+		}
+		expect((await a.getSchedules()).filter((s: { callback: string }) => s.callback === "restOver").length).toBe(1);
+		ws.close();
+	});
+
+	// The nonce exists for the WS path: a lost frame re-sent after a reconnect must be a full no-op,
+	// not just a skipped insert — restarting the rest timer or re-firing a policy would apply a
+	// program change twice off one set.
+	it("a re-sent log_set frame neither re-fires the policy nor restarts rest", async () => {
+		const a = await agent("ws-dedupe");
+		await a.reseed();
+		await a.createPlugin({ name: "auto-regulate", source: AUTO_REGULATE_SRC });
+		await a.startSession({ day: "Day A" });
+		const ws = await openSocket("ws-dedupe");
+
+		await ws.sendAndWait({ type: "log_set", exercise: "Front Squat", reps: 5, weight: 125, failed: true, nonce: "dup" }, (m) => m.type === "set_logged");
+		await ws.settle();
+		const rests = ws.seen.filter((m) => m.type === "rest_started").length;
+		const fires = ws.seen.filter((m) => m.type === "plugin_fired").length;
+		expect(rests).toBe(1);
+		expect(fires).toBe(1);
+
+		await ws.sendAndWait({ type: "log_set", exercise: "Front Squat", reps: 5, weight: 125, failed: true, nonce: "dup" }, (m) => m.type === "set_logged");
+		await ws.settle();
+		expect(ws.seen.filter((m) => m.type === "rest_started").length).toBe(rests);
+		expect(ws.seen.filter((m) => m.type === "plugin_fired").length).toBe(fires);
+		expect((await a.dumpState()).activeLoggedSets).toBe(1);
+		ws.close();
+	});
+
+	it("acks select_day over the socket and refuses a mid-session switch", async () => {
+		const a = await agent("ws-select-day");
+		await a.reseed();
+		const ws = await openSocket("ws-select-day");
+		const ok = await ws.sendAndWait({ type: "select_day", day: "Day B" }, (m) => m.type === "select_day_result");
+		expect(ok).toMatchObject({ ok: true, dayLabel: "Day B" });
+
+		await ws.sendAndWait({ type: "log_set", exercise: "Incline Bench", reps: 8, weight: 100, nonce: "n" }, (m) => m.type === "set_logged");
+		const refused = await ws.sendAndWait({ type: "select_day", day: "Day C" }, (m) => m.type === "select_day_result");
+		expect(refused).toEqual({ type: "select_day_result", ok: false, reason: "finish the current session first" });
+		ws.close();
+	});
+
+	/**
+	 * MARKUP CONTRACT ONLY — this asserts the page ships the elements and frame names the client and
+	 * server agree on. It deliberately does NOT assert on the inlined script's identifiers: checking
+	 * that the served HTML contains "patchLifts" or "outbox" passes just as happily when the logic is
+	 * inverted or deleted, and reads as coverage it isn't.
+	 *
+	 * The behaviours those identifiers belong to — patch-vs-rebuild, drafts, the outbox, prefill
+	 * precedence — are tested for real in test/dom/session-client.spec.ts, which runs under jsdom
+	 * (`npm run test:dom`) because workerd has no DOM to execute the script in.
+	 */
+	it("/session ships the markup and frame names the protocol depends on", async () => {
+		const html = await (await SELF.fetch("https://example.com/session")).text();
+		expect(html).toContain('id="restchip"');
+		expect(html).toContain('id="finish"');
+		expect(html).toContain('id="lifts"');
+		expect(html).toContain('id="receipts"');
+		expect(html).toContain("/agents/liftty-agent/me");
+		for (const frame of ["log_set", "set_rest", "set_scheme", "select_day", "session_complete"]) {
+			expect(html).toContain(frame);
+		}
+	});
+});
+
+// BLOCK-VIEW follow-ups: the compatibility, consistency and refusal paths the first pass missed.
+describe("liftty block view — compatibility + edge cases (BLOCK-VIEW)", () => {
+	// THE upgrade path. Sessions finalized by the deployed version carry no `block`, so without a
+	// backfill every already-logged day of the block vanishes from /block and /plan on deploy. The
+	// decision is a pure function of one row, so every shape is checked here directly.
+	it("migrateActuals tags a pre-tag block session and nothing else", () => {
+		const legacy = { focus: "Front Squat", summary: "Front Squat 3×8 @ 125", week: 1, day: "Day A" };
+		expect(migrateActuals("live-2026-07-22T10:00:00.000Z", legacy)).toEqual({ ...legacy, block: TRAINING_PLAN.id });
+
+		// Seed rows (date ids) and reseed synthetics carry week 1 for all three days — tagging either
+		// would make a pristine install report "week 1 complete, advance to week 2".
+		expect(migrateActuals("2025-12-29-A", { focus: "Front Squat", week: 1, day: "Day A" })).toBeNull();
+		expect(migrateActuals("synth-3", { focus: "Front Squat", week: 1, day: "Day A" })).toBeNull();
+		// Already tagged, and unplaceable rows, are left alone.
+		expect(migrateActuals("live-x", { week: 1, day: "Day A", block: TRAINING_PLAN.id })).toBeNull();
+		expect(migrateActuals("live-x", { focus: "Front Squat" })).toBeNull();
+	});
+
+	// The tag is the durable partition key for all history, so it must be the plan's stable id and
+	// never its display name — renaming the block would otherwise orphan every logged session.
+	it("partitions history on the plan's stable id, not its display name", async () => {
+		expect(TRAINING_PLAN.id).toBe("block-2026-07-fs-incline-hc");
+		expect(TRAINING_PLAN.id).not.toBe(TRAINING_PLAN.name);
+		const a = await agent("block-tag-id");
+		await a.reseed();
+		await a.startSession({ day: "Day A" });
+		await a.logSet({ exercise: "Front Squat", reps: 5, weight: 125 });
+		await a.finalizeSession();
+		const snap = await a.getDbSnapshot();
+		const row = snap.tables.find((t: { name: string }) => t.name === "sessions").rows.find((r: { id: string }) => r.id.startsWith("live-"));
+		expect(JSON.parse(row.actuals).block).toBe(TRAINING_PLAN.id);
+	});
+
+	// The seeded Dec–Jan log carries week 1 for all three days.
+	it("never counts the seeded pre-block history toward the block", async () => {
+		const a = await agent("block-backfill-seeds");
+		await a.reseed();
+		expect((await a.getPlanData()).week).toEqual({ index: 1, done: [], complete: false });
+		expect((await a.getBlockData()).weeks[0].cells.every((c: { status: string }) => c.status !== "done")).toBe(true);
+	});
+
+	// Reopening a finished day must not un-finish it: onConnect opens a session on today's day, and
+	// today is index 0 once the week is complete, so this used to knock the ✓ off Day A.
+	it("keeps a completed cell done while a session is live on it", async () => {
+		const a = await agent("block-live-flag");
+		await a.reseed();
+		await a.startSession({ day: "Day A" });
+		await a.logSet({ exercise: "Front Squat", reps: 5, weight: 125 });
+		await a.finalizeSession();
+		await a.startSession({ day: "Day A" }); // reopened
+
+		const wk = (await a.getBlockData()).weeks[0];
+		expect(wk.cells[0]).toMatchObject({ status: "done", live: true });
+		expect(wk.cells[1].live).toBeUndefined();
+	});
+
+	it("reports every cell status across past, current and future weeks", async () => {
+		const a = await agent("block-status-matrix");
+		await a.reseed();
+		await a.startSession({ day: "Day A" });
+		await a.logSet({ exercise: "Front Squat", reps: 5, weight: 125 });
+		await a.finalizeSession();
+		await a.setBlockWeek({ week: 2 });
+
+		const b = await a.getBlockData();
+		// Week 1: Day A logged, B and C skipped — "open" (a gap we moved past), never "future".
+		expect(b.weeks[0].cells.map((c: { status: string }) => c.status)).toEqual(["done", "open", "open"]);
+		// Week 2 is current and empty: first day is next, the rest are open.
+		expect(b.weeks[1].cells.map((c: { status: string }) => c.status)).toEqual(["next", "open", "open"]);
+		expect(b.weeks[2].cells.every((c: { status: string }) => c.status === "future")).toBe(true);
+	});
+
+	it("clears an empty session when the week changes so the next open re-derives the day", async () => {
+		const a = await agent("set-block-week-clears");
+		await a.reseed();
+		await a.startSession({ day: "Day C" });
+		expect((await a.getBlockData()).activeSession).toMatchObject({ dayLabel: "Day C", week: 1 });
+
+		expect(await a.setBlockWeek({ week: 3 })).toEqual({ ok: true, week: 3 });
+		expect((await a.getBlockData()).activeSession).toBeNull();
+
+		// A session started now files under week 3, not the week it had been pinned to.
+		await a.startSession({ day: "Day A" });
+		await a.logSet({ exercise: "Front Squat", reps: 5, weight: 135 });
+		await a.finalizeSession();
+		expect((await a.getHistory("Front Squat", 1))[0].week).toBe(3);
+	});
+
+	it("counts a repeated day as extra and surfaces the newest session's stats", async () => {
+		const a = await agent("block-extra");
+		await a.reseed();
+		for (const weight of [125, 145]) {
+			await a.startSession({ day: "Day A" });
+			await a.logSet({ exercise: "Front Squat", reps: 5, weight });
+			await a.finalizeSession();
+		}
+		const cell = (await a.getBlockData()).weeks[0].cells[0];
+		expect(cell.extra).toBe(1);
+		expect(cell.stats.top[0].weight).toBe(145); // newest wins
+		// A repeated day is still ONE day done.
+		expect((await a.getPlanData()).week).toEqual({ index: 1, done: ["Day A"], complete: false });
+	});
+
+	it("rejects a non-string day over RPC instead of throwing", async () => {
+		const a = await agent("start-session-types");
+		await a.reseed();
+		expect(await a.startSession({ day: null as never })).toMatchObject({ ok: false });
+		expect(await a.startSession({ day: 3 as never })).toMatchObject({ ok: false });
+		expect(await a.startSession({} as never)).toMatchObject({ ok: false, reason: "no day given" });
+		// …and non-integer / out-of-range weeks are refused rather than clamped silently.
+		expect(await a.setBlockWeek({ week: NaN })).toMatchObject({ ok: false });
+		expect(await a.setBlockWeek({ week: 0 })).toMatchObject({ ok: false });
+		expect(await a.setBlockWeek({ week: 3.7 })).toEqual({ ok: true, week: 3 });
+	});
+
+	it("round-trips every /block POST refusal as a redirect carrying its reason", async () => {
+		const me = await agent("me");
+		await me.reseed();
+		const post = (body: string) =>
+			SELF.fetch("https://example.com/block", {
+				method: "POST",
+				headers: { origin: "https://example.com", "content-type": "application/x-www-form-urlencoded" },
+				body,
+				redirect: "manual",
+			});
+
+		expect((await post("intent=day&day=Day+Z")).headers.get("location")).toContain("/block?err=");
+		expect((await post("intent=day")).headers.get("location")).toContain("/block?err=");
+		expect((await post("intent=week")).headers.get("location")).toContain("/block?err=");
+		expect((await post("intent=bogus")).headers.get("location")).toBe("/block"); // unknown intent just bounces
+
+		await me.startSession({ day: "Day A" });
+		await me.logSet({ exercise: "Front Squat", reps: 5, weight: 125 });
+		expect(decodeURIComponent((await post("intent=week&week=2")).headers.get("location")!)).toContain("finish the current session first");
+		expect(decodeURIComponent((await post("intent=day&day=Day+C")).headers.get("location")!)).toContain("finish the current session first");
+		await me.reseed();
+	});
+
+	it("escapes the reflected err param", async () => {
+		const html = await (await SELF.fetch("https://example.com/block?err=" + encodeURIComponent('<img src=x onerror="alert(1)">'))).text();
+		expect(html).not.toContain("<img src=x");
+		expect(html).toContain("&lt;img src=x");
+	});
+
+	// The coach's logSet tool must never carry a nonce — jsonSchema's additionalProperties:false is
+	// advisory to the model, so a model-emitted one would turn repeat calls into silent no-ops.
+	it("strips a nonce from the coach's logSet tool path", async () => {
+		const a = await agent("tool-nonce");
+		await a.reseed();
+		await a.startSession({ day: "Day A" });
+		const tools = buildTrainingTools(a);
+		await tools.logSet.execute!({ exercise: "Front Squat", reps: 5, weight: 125, nonce: "x" } as never, {} as never);
+		await tools.logSet.execute!({ exercise: "Front Squat", reps: 5, weight: 125, nonce: "x" } as never, {} as never);
+		expect((await a.dumpState()).activeLoggedSets).toBe(2);
+	});
+});
+
+// The pure domain helpers behind every /block number — no DO, no fetch.
+describe("liftty lift helpers (BLOCK-VIEW)", () => {
+	it("sessionStats handles empty and bodyweight sessions", () => {
+		expect(sessionStats([])).toEqual({ sets: 0, volume: 0, top: [] });
+		const bw = sessionStats([
+			{ exercise: "Pull-ups", reps: 8, weight: 0 },
+			{ exercise: "Pull-ups", reps: 6, weight: 0 },
+		]);
+		expect(bw).toMatchObject({ sets: 2, volume: 0 });
+		expect(bw.top[0]).toEqual({ exercise: "Pull-ups", weight: 0, reps: 8 });
+	});
+
+	it("sessionStats keeps the heaviest set per exercise in first-logged order", () => {
+		const s = sessionStats([
+			{ exercise: "Front Squat", reps: 8, weight: 125 },
+			{ exercise: "RDL", reps: 10, weight: 100 },
+			{ exercise: "Front Squat", reps: 3, weight: 155 },
+		]);
+		expect(s.top.map((t) => t.exercise)).toEqual(["Front Squat", "RDL"]);
+		expect(s.top[0]).toEqual({ exercise: "Front Squat", weight: 155, reps: 3 });
+		expect(s.volume).toBe(8 * 125 + 10 * 100 + 3 * 155);
+	});
+
+	it("liftBrief covers rounds, per-side and BW+X shapes", () => {
+		expect(liftBrief({ exercise: "x", kind: "rounds", sets: 3, reps: 0 })).toBe("3 rounds");
+		expect(liftBrief({ exercise: "x", sets: 3, reps: 8, weight: 30, perSide: true })).toBe("3×8 @ 30/side");
+		expect(liftBrief({ exercise: "x", sets: 4, reps: 6, addedWeight: 10 })).toBe("4×6 @ BW+10");
+		expect(liftBrief({ exercise: "x", sets: 4, reps: 6 })).toBe("4×6");
+		expect(topLiftBrief({ day: "Day A", focus: "f", lifts: [] })).toBe("");
+	});
+
+	it("summarizeSets collapses a rep range and drops a bodyweight load", () => {
+		expect(
+			summarizeSets([
+				{ exercise: "Front Squat", reps: 8, weight: 125 },
+				{ exercise: "Front Squat", reps: 5, weight: 135 },
+				{ exercise: "Pull-ups", reps: 6, weight: 0 },
+			]),
+		).toBe("Front Squat 2×5–8 @ 135 · Pull-ups 1×6");
+		expect(summarizeSets([])).toBe("");
 	});
 });

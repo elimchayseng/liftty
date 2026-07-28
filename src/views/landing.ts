@@ -37,6 +37,10 @@ export function renderLanding(): string {
         <div><div class="label">Plan</div><div class="desc">today · what's next</div></div>
         <span class="arrow">&rarr;</span>
       </a>
+      <a class="entry" href="/block">
+        <div><div class="label">Block</div><div class="desc">the full plan · pick a day</div></div>
+        <span class="arrow">&rarr;</span>
+      </a>
       <a class="entry" href="/session">
         <div><div class="label">Session</div><div class="desc">log sets live</div></div>
         <span class="arrow">&rarr;</span>
