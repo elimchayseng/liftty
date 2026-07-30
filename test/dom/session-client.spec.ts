@@ -123,6 +123,18 @@ function hello(over: Partial<Frame> = {}): Frame {
 	};
 }
 
+/** A `cf_agent_state` broadcast for a one-lift day — what the server sends on every setState. */
+function pressState(over: Partial<Frame>, loggedSets: Frame[] = []): Frame {
+	const lift = { exercise: "DB Shoulder Press", sets: 4, reps: 10, weight: 40, ...over };
+	return {
+		type: "cf_agent_state",
+		state: {
+			program: { days: [{ day: "Day A", focus: "Front Squat", lifts: [lift] }] },
+			activeSession: { day: "Front Squat", dayLabel: "Day A", week: 1, loggedSets },
+		},
+	};
+}
+
 const rows = () => Array.from(document.querySelectorAll<HTMLElement>("#lifts .lift"));
 const wtInput = (i = 0) => rows()[i].querySelectorAll<HTMLInputElement>(".ctl input")[1];
 const repsInput = (i = 0) => rows()[i].querySelectorAll<HTMLInputElement>(".ctl input")[0];
@@ -183,6 +195,57 @@ describe("/session client — typed values are sacred", () => {
 		expect(wtInput().value).toBe("100");
 		expect(bigWeight()).toBe("100");
 		expect(rows()[0].className).toContain("changed");
+	});
+
+	// THE reported bug, second report: change the reps chip 10 → 8 partway through a session and every
+	// remaining set still logged as 10. patchLifts painted the moved prescription into the field but
+	// recorded nothing, and prefill() ranks the last set logged ABOVE the prescription — so the next
+	// repaint of any kind read the field back to the previous set while the chip went on showing 8.
+	// The lifter saw the change hold on screen and had no reason to look at the field again.
+	it("keeps a mid-session scheme change in the reps field across later repaints", () => {
+		const { api, wire, socket } = boot();
+		socket().open();
+		api.handle(hello({ lifts: [{ exercise: "DB Shoulder Press", sets: 4, reps: 10, weight: 40 }] }));
+
+		rows()[0].querySelector<HTMLButtonElement>(".log")!.click(); // set 1 at the prescribed 10
+		const logged = [{ exercise: "DB Shoulder Press", reps: 10, weight: 40 }];
+		api.handle(pressState({ reps: 10 }, logged));
+
+		// "too heavy — I'll do 8s": the chip round-trips and comes back as a scheme change.
+		const repsChip = rows()[0].querySelectorAll<HTMLInputElement>(".chip")[1];
+		repsChip.value = "8";
+		repsChip.dispatchEvent(new Event("change", { bubbles: true }));
+		api.handle(pressState({ reps: 8 }, logged));
+		expect(repsInput().value).toBe("8");
+
+		// …and now any other repaint at all — a rest save, a policy, a reconnect.
+		api.handle(pressState({ reps: 8 }, logged));
+		expect(repsInput().value).toBe("8");
+		expect(rows()[0].querySelectorAll<HTMLInputElement>(".chip")[1].value).toBe("8");
+
+		rows()[0].querySelector<HTMLButtonElement>(".log")!.click();
+		expect(wire.filter((f) => f.type === "log_set").slice(-1)[0].reps).toBe(8);
+	});
+
+	// Same hole, weight side: a policy cut held for exactly one repaint and then reverted to the weight
+	// of the last set logged, while the big number kept showing the cut.
+	it("keeps a policy weight cut in the weight field across later repaints", () => {
+		const { api, wire, socket } = boot();
+		socket().open();
+		api.handle(hello({ lifts: [{ exercise: "DB Shoulder Press", sets: 4, reps: 10, weight: 40 }] }));
+
+		rows()[0].querySelector<HTMLButtonElement>(".log")!.click();
+		const logged = [{ exercise: "DB Shoulder Press", reps: 10, weight: 40 }];
+		api.handle(pressState({ reps: 10, weight: 40 }, logged));
+
+		api.handle(pressState({ reps: 10, weight: 30 }, logged)); // the cut
+		expect(wtInput().value).toBe("30");
+		api.handle(pressState({ reps: 10, weight: 30 }, logged)); // the next repaint
+		expect(wtInput().value).toBe("30");
+		expect(bigWeight()).toBe("30");
+
+		rows()[0].querySelector<HTMLButtonElement>(".log")!.click();
+		expect(wire.filter((f) => f.type === "log_set").slice(-1)[0].weight).toBe(30);
 	});
 
 	it("prefills the next set from the last one logged, not the prescription", () => {
