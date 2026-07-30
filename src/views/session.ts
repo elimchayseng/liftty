@@ -26,7 +26,8 @@ import { renderHead, renderHeader } from "./shared";
  * changes — a day switch or a week change. Typed values are mirrored into a localStorage draft keyed
  * by week+day, so even a genuine reload (iOS Safari discards backgrounded tabs) restores them. Prefill
  * precedence is draft > last set logged this session > prescription, which is why a reconnect restores
- * the working weight rather than resetting to the program's opener.
+ * the working weight rather than resetting to the program's opener. A prescription that MOVES mid-session
+ * is recorded as a draft too — that is the only way a new instruction outranks the set already logged.
  *
  * The socket is assumed unreliable: frames composed while it is down are queued (and mirrored to
  * localStorage, so a discarded tab doesn't lose them) and replayed on open rather than dropped, every
@@ -423,15 +424,20 @@ export function renderSession(): string {
       // editing the sets×reps chip round-trips through the server and comes back as schemeMoved — so
       // letting it reach for the weight field would destroy a weight they had just typed, which is the
       // exact bug this whole change exists to fix.
-      if (weightMoved) {
-        if (drafts[l.exercise]) { drafts[l.exercise].weight = w != null ? String(w) : ''; saveDrafts(); }
-        if (document.activeElement !== r.wt) r.wt.value = w != null ? String(w) : '';
-      }
-      if (schemeMoved) {
-        if (drafts[l.exercise]) { drafts[l.exercise].reps = String(l.reps); saveDrafts(); }
-        if (document.activeElement !== r.reps) r.reps.value = String(l.reps);
-      }
-      if (!weightMoved && !schemeMoved) seedInputs(l, r);
+      if (weightMoved && document.activeElement !== r.wt) r.wt.value = w != null ? String(w) : '';
+      if (schemeMoved && document.activeElement !== r.reps) r.reps.value = String(l.reps);
+      // A move that reached a field has to be REMEMBERED, not just painted, and the draft is the only
+      // thing prefill() ranks above the last set logged. Without this the next repaint of any kind — a
+      // rest-chip save, a policy, a reconnect, a set logged on another lift — reseeds the field from
+      // that last set while the chips and the big weight go on showing the new prescription. That gap
+      // is the reported bug: change 10 reps to 8, watch the row flash and the chip hold 8, then have
+      // every remaining set log as 10 because the field had quietly snapped back.
+      //
+      // Snapshot BOTH fields, not just the one that moved, so the draft mirrors the row exactly: a
+      // scheme move must carry the typed weight forward untouched, not blank it. A focused field is
+      // recorded as it currently reads, since it was deliberately not written to above.
+      if (weightMoved || schemeMoved) { drafts[l.exercise] = { reps: r.reps.value, weight: r.wt.value }; saveDrafts(); }
+      else seedInputs(l, r);
       lastWeights[l.exercise] = w;
       lastScheme[l.exercise] = sch;
     });
